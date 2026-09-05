@@ -1,0 +1,15 @@
+# Jarvis AI — Python Dependencies
+google-generativeai>=0.8.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.150.0
+SpeechRecognition>=3.10.0
+PyAudio>=0.2.14
+python-dotenv>=1.0.0
+rich>=13.9.0
+requests>=2.32.0
+beautifulsoup4>=4.12.0
+PyQt6>=6.0.0
+openwakeword>=0.6.0
+markdown==3.10.2
+duckduckgo-search>=7.0.0
+ddgs>=9.0.0
