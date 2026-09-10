@@ -44,7 +44,7 @@ def _run_async(coro):
         return loop.run_until_complete(coro)
 
 
-async def _ensure_browser_connected():
+async def _ensure_browser_connected(allow_launch: bool = False):
     """Connect to the user's running Chrome/Brave via CDP if not already connected."""
     global _browser, _page, _context, _playwright
 
@@ -61,20 +61,19 @@ async def _ensure_browser_connected():
         try:
             _browser = await _playwright.chromium.connect_over_cdp(
                 f"http://localhost:{CDP_PORT}",
-                timeout=3000
+                timeout=2000
             )
         except Exception:
+            if not allow_launch:
+                return None
+            # Only launch a clean Chromium instance if explicitly allowed
             try:
-                # Browser not running with CDP — try launching it
-                _launch_browser_with_cdp()
-                await asyncio.sleep(2)
-                _browser = await _playwright.chromium.connect_over_cdp(
-                    f"http://localhost:{CDP_PORT}",
-                    timeout=3000
-                )
-            except Exception:
-                # Fallback: Launch a clean Chromium instance
                 _browser = await _playwright.chromium.launch(headless=False)
+            except Exception:
+                return None
+
+        if not _browser:
+            return None
 
         # Get the first context and page
         contexts = _browser.contexts
@@ -92,8 +91,9 @@ async def _ensure_browser_connected():
         return _page
 
     except Exception as e:
-        raise Exception(f"Could not connect to browser: {e}. "
-                        f"Make sure Chrome/Brave is running or let me relaunch it.")
+        if not allow_launch:
+            return None
+        raise Exception(f"Could not connect to browser: {e}")
 
 
 def _launch_browser_with_cdp():

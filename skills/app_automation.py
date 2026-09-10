@@ -133,8 +133,8 @@ def app_type_text(app_name: str, text: str, clear_first: bool = False, press_ent
 
 def apple_music_search(query: str, auto_play: bool = True) -> str:
     """
-    Open Apple Music, navigate to the search bar, type the query, and search.
-    Optionally starts playback of the top result.
+    Open Apple Music, navigate to the search bar, switch to the 'Apple Music' catalog tab,
+    type the query, and search. Optionally starts playback of the top result.
     
     Args:
         query: The song, artist, album, or playlist to search for
@@ -142,48 +142,95 @@ def apple_music_search(query: str, auto_play: bool = True) -> str:
     """
     clean_query = _escape_applescript_string(query)
     
-    # AppleScript specifically tuned for macOS Music app
-    script = f'''
+    # 1. Activate and reopen Music app (reopen ensures main window appears even if app was running with 0 windows)
+    reopen_script = '''
+    tell application "Music"
+        reopen
+        activate
+    end tell
+    '''
+    _run_applescript(reopen_script)
+    time.sleep(0.5)
+
+    # 2. Focus search bar using Cmd + F, then select 'Apple Music' tab instead of 'Library'
+    search_tab_script = f'''
     tell application "Music" to activate
-    delay 0.4
+    delay 0.2
     tell application "System Events"
         tell process "Music"
             -- Focus search bar using Cmd + F
             keystroke "f" using {{command down}}
+            delay 0.3
+
+            -- Select the "Apple Music" tab in the toolbar radio group
+            try
+                set w to first window
+                set tb to first UI element of w whose role is "AXToolbar"
+                repeat with grp in (UI elements of tb)
+                    try
+                        set rGroup to first UI element of grp whose role is "AXRadioGroup"
+                        repeat with btn in (UI elements of rGroup)
+                            if (description of btn contains "Apple Music") or (title of btn contains "Apple Music") then
+                                click btn
+                                exit repeat
+                            end if
+                        end repeat
+                    end try
+                end repeat
+            end try
             delay 0.2
-            -- Select all in search box to clear previous search
+
+            -- Select all in search box to clear previous query
             keystroke "a" using {{command down}}
             delay 0.1
-            -- Type the query
-            keystroke "{clean_query}"
+            key code 51 -- Backspace
             delay 0.1
-            -- Press Enter to perform search
-            key code 36
+
+            -- Type the query and press Enter to search
+            keystroke "{clean_query}"
+            delay 0.2
+            key code 36 -- Return
         end tell
     end tell
     '''
     
-    success, out = _run_applescript(script)
+    success, out = _run_applescript(search_tab_script)
     if not success:
         return f"Could not search Apple Music: {out}"
         
     if auto_play:
-        time.sleep(1.0)
-        # Attempt to play the top result by pressing Return or Space
+        time.sleep(1.2)
+        # Attempt to play the top result
         play_script = '''
+        tell application "Music" to activate
+        delay 0.2
         tell application "System Events"
             tell process "Music"
-                -- Press Down arrow or Return to activate top track/result
-                key code 125 -- down arrow
+                -- Press Down arrow to enter results list and Return to play
+                key code 125 -- Down Arrow
                 delay 0.3
-                key code 36 -- Return to play
+                key code 36 -- Return
+                delay 0.2
+                key code 49 -- Spacebar
             end tell
         end tell
+        tell application "Music" to play
         '''
         _run_applescript(play_script)
-        return f"Searched Apple Music for '{query}' and initiated playback."
+
+        # Fallback double-click on first result card if needed
+        if HAS_PYAUTOGUI:
+            try:
+                # Top-left result card in Apple Music grid is typically around (550, 245)
+                pyautogui.doubleClick(550, 245)
+                time.sleep(0.3)
+                _run_applescript('tell application "Music" to play')
+            except Exception:
+                pass
+
+        return f"Searched Apple Music for '{query}' in the Apple Music tab and initiated playback."
         
-    return f"Searched Apple Music for '{query}'."
+    return f"Searched Apple Music for '{query}' in the Apple Music tab."
 
 
 def apple_music_control(action: str) -> str:

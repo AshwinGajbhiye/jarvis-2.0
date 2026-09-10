@@ -1,325 +1,440 @@
 # Jarvis AI — YouTube Controller
-# Controls YouTube playback in the user's browser tab via Playwright CDP.
-# Search, play, pause, forward, rewind, skip ads, fullscreen, volume.
+# Controls YouTube playback directly in the user's running browser tab (Brave, Chrome, Safari, Edge, Arc).
+# Supports in-tab playback, forward/rewind, play/pause, ad-skipping, and volume WITHOUT opening new tabs or browsers.
 
-import asyncio
+import subprocess
 import threading
 import time
+import urllib.parse
+from typing import Optional, Tuple
 
-from skills.playwright_browser import (
-    _ensure_browser_connected, _run_async, _get_active_page
-)
-
-
-def _find_youtube_page():
-    """Find the YouTube tab in the browser."""
-    async def _find():
-        page = await _ensure_browser_connected()
-        from skills.playwright_browser import _context
-        if _context:
-            for p in _context.pages:
-                if not p.is_closed() and "youtube.com" in p.url:
-                    return p
-        # If no YouTube tab found, check if current page is YouTube
-        if "youtube.com" in page.url:
-            return page
-        return None
-
-    return _run_async(_find())
+try:
+    import pyautogui
+    HAS_PYAUTOGUI = True
+except ImportError:
+    HAS_PYAUTOGUI = False
 
 
-def youtube_search_in_tab(query: str) -> str:
-    """Search for a video on YouTube within the active YouTube tab."""
-    async def _search():
-        page = await _ensure_browser_connected()
-        from skills.playwright_browser import _context, _page
-        
-        # Find or navigate to YouTube
-        yt_page = None
-        if _context:
-            for p in _context.pages:
-                if not p.is_closed() and "youtube.com" in p.url:
-                    yt_page = p
-                    break
-        
-        if not yt_page:
-            # Navigate current page to YouTube
-            yt_page = page
-            await yt_page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(2)
-        
-        await yt_page.bring_to_front()
-        
-        # Click the search box and type
-        try:
-            search_input = await yt_page.query_selector("input#search, input[name='search_query']")
-            if search_input:
-                await search_input.click()
-                await search_input.fill("")
-                await search_input.fill(query)
-                await asyncio.sleep(0.3)
-                await yt_page.keyboard.press("Enter")
-                await asyncio.sleep(2)
-                return f"Searching YouTube for '{query}'."
-            else:
-                # Fallback: use URL
-                import urllib.parse
-                encoded = urllib.parse.quote_plus(query)
-                await yt_page.goto(f"https://www.youtube.com/results?search_query={encoded}", 
-                                   wait_until="domcontentloaded", timeout=15000)
-                return f"Searching YouTube for '{query}'."
-        except Exception as e:
-            return f"Search failed: {e}"
+# ── Helper functions ──────────────────────────────────────────
 
+def _run_applescript(script: str) -> Tuple[bool, str]:
+    """Execute an AppleScript snippet and return (success, output)."""
     try:
-        return _run_async(_search())
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=8
+        )
+        if proc.returncode == 0:
+            return True, proc.stdout.strip()
+        return False, proc.stderr.strip()
     except Exception as e:
-        return f"YouTube search failed: {e}"
+        return False, str(e)
 
 
-def youtube_play_first_result() -> str:
-    """Click the first video result on a YouTube search results page."""
-    async def _play():
-        page = await _ensure_browser_connected()
-        from skills.playwright_browser import _context
+def _find_and_focus_youtube_tab() -> Tuple[bool, str, str]:
+    """
+    Search all running browsers (Brave, Chrome, Safari, Edge, Arc) for an open YouTube tab.
+    If found, brings that tab to the foreground in its window and activates the browser.
+    Returns (found, browser_app_name, tab_title).
+    NEVER opens a new browser window or creates new tabs.
+    """
+    script = '''
+    on findYT()
+        set foundApp to ""
+        set foundTitle to ""
         
-        yt_page = None
-        if _context:
-            for p in _context.pages:
-                if not p.is_closed() and "youtube.com" in p.url:
-                    yt_page = p
-                    break
+        -- 1. Check Brave Browser
+        try
+            tell application "System Events"
+                if (count of (processes whose name is "Brave Browser")) > 0 then
+                    tell application "Brave Browser"
+                        repeat with w in windows
+                            set tIdx to 1
+                            repeat with t in tabs of w
+                                set u to (URL of t as text)
+                                set tit to (title of t as text)
+                                if (u contains "youtube.com") or (tit contains "YouTube") then
+                                    set active tab index of w to tIdx
+                                    set index of w to 1
+                                    set foundApp to "Brave Browser"
+                                    set foundTitle to tit
+                                    exit repeat
+                                end if
+                                set tIdx to tIdx + 1
+                            end repeat
+                            if foundApp is not "" then exit repeat
+                        end repeat
+                    end tell
+                end if
+            end tell
+        end try
         
-        if not yt_page:
-            return "No YouTube tab found. Search for something first."
+        -- 2. Check Google Chrome
+        if foundApp is "" then
+            try
+                tell application "System Events"
+                    if (count of (processes whose name is "Google Chrome")) > 0 then
+                        tell application "Google Chrome"
+                            repeat with w in windows
+                                set tIdx to 1
+                                repeat with t in tabs of w
+                                    set u to (URL of t as text)
+                                    set tit to (title of t as text)
+                                    if (u contains "youtube.com") or (tit contains "YouTube") then
+                                        set active tab index of w to tIdx
+                                        set index of w to 1
+                                        set foundApp to "Google Chrome"
+                                        set foundTitle to tit
+                                        exit repeat
+                                    end if
+                                    set tIdx to tIdx + 1
+                                end repeat
+                                if foundApp is not "" then exit repeat
+                            end repeat
+                        end tell
+                    end if
+                end tell
+            end try
+        end if
         
-        await yt_page.bring_to_front()
+        -- 3. Check Safari
+        if foundApp is "" then
+            try
+                tell application "System Events"
+                    if (count of (processes whose name is "Safari")) > 0 then
+                        tell application "Safari"
+                            repeat with w in windows
+                                set tIdx to 1
+                                repeat with t in tabs of w
+                                    set u to (URL of t as text)
+                                    set tit to (name of t as text)
+                                    if (u contains "youtube.com") or (tit contains "YouTube") then
+                                        set current tab of w to t
+                                        set index of w to 1
+                                        set foundApp to "Safari"
+                                        set foundTitle to tit
+                                        exit repeat
+                                    end if
+                                    set tIdx to tIdx + 1
+                                end repeat
+                                if foundApp is not "" then exit repeat
+                            end repeat
+                        end tell
+                    end if
+                end tell
+            end try
+        end if
         
-        # Click the first video thumbnail/title
-        try:
-            # Try clicking a video renderer
-            video = await yt_page.query_selector("ytd-video-renderer a#video-title, ytd-rich-item-renderer a#video-title-link")
-            if video:
-                await video.click()
-                await asyncio.sleep(2)
-                return "Playing the first video result."
-            
-            # Try another selector pattern
-            video = await yt_page.query_selector("a.ytd-thumbnail[href*='watch']")
-            if video:
-                await video.click()
-                await asyncio.sleep(2)
-                return "Playing the first video result."
-            
-            return "Could not find a video to play on the current page."
-        except Exception as e:
-            return f"Failed to play video: {e}"
-
-    try:
-        return _run_async(_play())
-    except Exception as e:
-        return f"Play first result failed: {e}"
-
-
-def youtube_play_pause() -> str:
-    """Toggle play/pause on the current YouTube video."""
-    async def _toggle():
-        yt_page = _find_youtube_page_sync()
-        if not yt_page:
-            return "No YouTube video tab found."
+        -- 4. Check Microsoft Edge
+        if foundApp is "" then
+            try
+                tell application "System Events"
+                    if (count of (processes whose name is "Microsoft Edge")) > 0 then
+                        tell application "Microsoft Edge"
+                            repeat with w in windows
+                                set tIdx to 1
+                                repeat with t in tabs of w
+                                    set u to (URL of t as text)
+                                    set tit to (title of t as text)
+                                    if (u contains "youtube.com") or (tit contains "YouTube") then
+                                        set active tab index of w to tIdx
+                                        set index of w to 1
+                                        set foundApp to "Microsoft Edge"
+                                        set foundTitle to tit
+                                        exit repeat
+                                    end if
+                                    set tIdx to tIdx + 1
+                                end repeat
+                                if foundApp is not "" then exit repeat
+                            end repeat
+                        end tell
+                    end if
+                end tell
+            end try
+        end if
         
-        # Press 'k' which is YouTube's play/pause shortcut
-        await yt_page.keyboard.press("k")
-        
-        # Check if video is paused or playing
-        is_paused = await yt_page.evaluate("""
-            () => {
-                const video = document.querySelector('video');
-                return video ? video.paused : null;
-            }
-        """)
-        
-        if is_paused is True:
-            return "Video paused."
-        elif is_paused is False:
-            return "Video playing."
-        else:
-            return "Toggled play/pause."
+        -- 5. Check Arc
+        if foundApp is "" then
+            try
+                tell application "System Events"
+                    if (count of (processes whose name is "Arc")) > 0 then
+                        tell application "Arc"
+                            repeat with w in windows
+                                set tIdx to 1
+                                repeat with t in tabs of w
+                                    set u to (URL of t as text)
+                                    set tit to (title of t as text)
+                                    if (u contains "youtube.com") or (tit contains "YouTube") then
+                                        set active tab index of w to tIdx
+                                        set index of w to 1
+                                        set foundApp to "Arc"
+                                        set foundTitle to tit
+                                        exit repeat
+                                    end if
+                                    set tIdx to tIdx + 1
+                                end repeat
+                                if foundApp is not "" then exit repeat
+                            end repeat
+                        end tell
+                    end if
+                end tell
+            end try
+        end if
 
-    def _find_youtube_page_sync():
-        return _find_youtube_page()
+        if foundApp is not "" then
+            tell application foundApp to activate
+            return foundApp & "|||" & foundTitle
+        else
+            return "NONE"
+        end if
+    end findYT
 
-    try:
-        return _run_async(_toggle())
-    except Exception as e:
-        return f"Play/pause failed: {e}"
+    return findYT()
+    '''
+    success, out = _run_applescript(script)
+    if success and out != "NONE" and "|||" in out:
+        parts = out.split("|||", 1)
+        return True, parts[0].strip(), parts[1].strip()
+    return False, "", ""
 
+
+def _send_keys_to_browser(browser_name: str, keys_script: str):
+    """Ensure the target browser is frontmost and send keystrokes."""
+    script = f'''
+    tell application "{browser_name}" to activate
+    delay 0.1
+    tell application "System Events"
+        tell process "{browser_name}"
+            {keys_script}
+        end tell
+    end tell
+    '''
+    _run_applescript(script)
+
+
+# ── YouTube Operations in Current Tab ──────────────────────────
 
 def youtube_forward(seconds: int = 10) -> str:
-    """Forward the YouTube video by a number of seconds."""
-    async def _forward():
-        yt_page = _find_youtube_page()
-        if not yt_page:
-            return "No YouTube video tab found."
-        
-        # Use JavaScript to seek forward
-        result = await yt_page.evaluate(f"""
-            () => {{
-                const video = document.querySelector('video');
-                if (video) {{
-                    video.currentTime += {seconds};
-                    return Math.floor(video.currentTime);
-                }}
-                return null;
-            }}
-        """)
-        
-        if result is not None:
-            return f"Forwarded {seconds} seconds. Now at {result}s."
-        
-        # Fallback: press right arrow (5 second increments)
-        presses = max(1, seconds // 5)
-        for _ in range(presses):
-            await yt_page.keyboard.press("ArrowRight")
-            await asyncio.sleep(0.1)
-        return f"Forwarded approximately {presses * 5} seconds."
+    """
+    Fast-forward the currently playing YouTube video by N seconds in the current tab.
+    Uses official YouTube keyboard shortcuts ('l' for 10s, right arrow for 5s).
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    if not found:
+        return "No active YouTube tab found in your open browsers, Sir. Please make sure YouTube is open."
 
-    try:
-        return _run_async(_forward())
-    except Exception as e:
-        return f"Forward failed: {e}"
+    # In YouTube web player:
+    # 'l' seeks forward 10s
+    # Right arrow (key code 124) seeks forward 5s
+    if seconds <= 5:
+        key_cmd = 'key code 124'  # Right arrow
+    else:
+        jumps = max(1, round(seconds / 10))
+        key_cmd = 'keystroke "l"\n            delay 0.1\n            ' * (jumps - 1) + 'keystroke "l"'
+
+    _send_keys_to_browser(app_name, key_cmd)
+    return f"Forwarded YouTube video by {seconds} seconds in {app_name}."
 
 
 def youtube_rewind(seconds: int = 10) -> str:
-    """Rewind the YouTube video by a number of seconds."""
-    async def _rewind():
-        yt_page = _find_youtube_page()
-        if not yt_page:
-            return "No YouTube video tab found."
-        
-        result = await yt_page.evaluate(f"""
-            () => {{
-                const video = document.querySelector('video');
-                if (video) {{
-                    video.currentTime = Math.max(0, video.currentTime - {seconds});
-                    return Math.floor(video.currentTime);
-                }}
-                return null;
-            }}
-        """)
-        
-        if result is not None:
-            return f"Rewound {seconds} seconds. Now at {result}s."
-        
-        presses = max(1, seconds // 5)
-        for _ in range(presses):
-            await yt_page.keyboard.press("ArrowLeft")
-            await asyncio.sleep(0.1)
-        return f"Rewound approximately {presses * 5} seconds."
+    """
+    Rewind the currently playing YouTube video by N seconds in the current tab.
+    Uses official YouTube keyboard shortcuts ('j' for 10s, left arrow for 5s).
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    if not found:
+        return "No active YouTube tab found in your open browsers, Sir. Please make sure YouTube is open."
 
-    try:
-        return _run_async(_rewind())
-    except Exception as e:
-        return f"Rewind failed: {e}"
+    # In YouTube web player:
+    # 'j' seeks rewind 10s
+    # Left arrow (key code 123) seeks rewind 5s
+    if seconds <= 5:
+        key_cmd = 'key code 123'  # Left arrow
+    else:
+        jumps = max(1, round(seconds / 10))
+        key_cmd = 'keystroke "j"\n            delay 0.1\n            ' * (jumps - 1) + 'keystroke "j"'
+
+    _send_keys_to_browser(app_name, key_cmd)
+    return f"Rewound YouTube video by {seconds} seconds in {app_name}."
 
 
-def youtube_skip_ad() -> str:
-    """Skip the ad on the current YouTube video if a skip button is available."""
-    async def _skip():
-        yt_page = _find_youtube_page()
-        if not yt_page:
-            return "No YouTube video tab found."
-        
-        # Try multiple skip ad button selectors
-        skip_selectors = [
-            ".ytp-skip-ad-button",
-            ".ytp-ad-skip-button",
-            ".ytp-ad-skip-button-text",
-            "button.ytp-ad-skip-button-modern",
-            ".ytp-ad-skip-button-container button",
-            "[class*='skip-ad']",
-            "button[id*='skip']",
-        ]
-        
-        for selector in skip_selectors:
-            try:
-                btn = await yt_page.query_selector(selector)
-                if btn and await btn.is_visible():
-                    await btn.click()
-                    return "Ad skipped!"
-            except Exception:
-                continue
-        
-        # Check if there's an ad playing but no skip button yet
-        ad_playing = await yt_page.evaluate("""
-            () => {
-                const adOverlay = document.querySelector('.ytp-ad-player-overlay, .ad-showing, .ytp-ad-module');
-                return !!adOverlay;
-            }
-        """)
-        
-        if ad_playing:
-            return "Ad is playing but no skip button is available yet. Please wait."
-        
-        return "No ad detected on the current video."
+def youtube_play_pause() -> str:
+    """
+    Toggle play/pause on the currently playing YouTube video in the open tab.
+    Uses YouTube's official 'k' shortcut.
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    if not found:
+        return "No active YouTube tab found in your open browsers, Sir."
 
-    try:
-        return _run_async(_skip())
-    except Exception as e:
-        return f"Ad skip failed: {e}"
+    _send_keys_to_browser(app_name, 'keystroke "k"')
+    return f"Toggled play/pause on YouTube in {app_name}."
 
 
 def youtube_fullscreen() -> str:
-    """Toggle fullscreen on the YouTube video."""
-    async def _fs():
-        yt_page = _find_youtube_page()
-        if not yt_page:
-            return "No YouTube video tab found."
-        await yt_page.keyboard.press("f")
-        return "Toggled fullscreen."
+    """
+    Toggle fullscreen mode on the currently open YouTube video.
+    Uses YouTube's official 'f' shortcut.
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    if not found:
+        return "No active YouTube tab found in your open browsers, Sir."
 
-    try:
-        return _run_async(_fs())
-    except Exception as e:
-        return f"Fullscreen toggle failed: {e}"
-
-
-def youtube_set_volume(level: int) -> str:
-    """Set the YouTube video volume (0-100)."""
-    async def _vol():
-        yt_page = _find_youtube_page()
-        if not yt_page:
-            return "No YouTube video tab found."
-        
-        level_clamped = max(0, min(100, level))
-        await yt_page.evaluate(f"""
-            () => {{
-                const video = document.querySelector('video');
-                if (video) video.volume = {level_clamped / 100};
-            }}
-        """)
-        return f"YouTube volume set to {level_clamped}%."
-
-    try:
-        return _run_async(_vol())
-    except Exception as e:
-        return f"Volume set failed: {e}"
+    _send_keys_to_browser(app_name, 'keystroke "f"')
+    return f"Toggled fullscreen on YouTube in {app_name}."
 
 
 def youtube_next_video() -> str:
-    """Skip to the next video in the YouTube queue."""
-    async def _next():
-        yt_page = _find_youtube_page()
-        if not yt_page:
-            return "No YouTube video tab found."
-        await yt_page.keyboard.press("Shift+N")
-        await asyncio.sleep(1)
-        return "Skipped to next video."
+    """
+    Skip to the next video in the YouTube queue/playlist.
+    Uses YouTube's official Shift+N shortcut.
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    if not found:
+        return "No active YouTube tab found in your open browsers, Sir."
 
-    try:
-        return _run_async(_next())
-    except Exception as e:
-        return f"Next video failed: {e}"
+    _send_keys_to_browser(app_name, 'keystroke "N" using {shift down}')
+    return f"Skipped to next video on YouTube in {app_name}."
+
+
+def youtube_set_volume(level: int) -> str:
+    """
+    Adjust YouTube player volume.
+    Uses 'm' for mute if level == 0, or Up/Down arrows.
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    if not found:
+        return "No active YouTube tab found in your open browsers, Sir."
+
+    level_clamped = max(0, min(100, level))
+    if level_clamped == 0:
+        _send_keys_to_browser(app_name, 'keystroke "m"')
+        return f"Muted YouTube in {app_name}."
+    elif level_clamped > 60:
+        _send_keys_to_browser(app_name, 'key code 126\n            delay 0.05\n            key code 126\n            delay 0.05\n            key code 126')
+        return f"Turned volume up on YouTube in {app_name}."
+    else:
+        _send_keys_to_browser(app_name, 'key code 125\n            delay 0.05\n            key code 125\n            delay 0.05\n            key code 125')
+        return f"Turned volume down on YouTube in {app_name}."
+
+
+def youtube_skip_ad() -> str:
+    """
+    Skip the ad currently playing on YouTube in the user's active tab.
+    Uses YouTube's native Tab+Return skip sequence and video player corner clicks.
+    Does NOT open new tabs or new browser windows.
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    if not found:
+        return "No active YouTube tab found in your open browsers, Sir."
+
+    # Action 1: YouTube keyboard sequence for Skip Ad (Tab to focus skip button, then Return/Space)
+    skip_key_script = '''
+    key code 48 -- Tab
+    delay 0.1
+    key code 36 -- Return
+    delay 0.1
+    key code 49 -- Space
+    '''
+    _send_keys_to_browser(app_name, skip_key_script)
+
+    # Action 2: Click the bottom-right corner of the video player where Skip Ad button appears
+    if HAS_PYAUTOGUI:
+        try:
+            bounds_script = f'''
+            tell application "System Events"
+                tell process "{app_name}"
+                    set w to first window
+                    set p to position of w
+                    set s to size of w
+                    return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+                end tell
+            end tell
+            '''
+            b_success, b_out = _run_applescript(bounds_script)
+            if b_success and "," in b_out:
+                parts = [int(x.strip()) for x in b_out.split(",")]
+                wx, wy, ww, wh = parts[0], parts[1], parts[2], parts[3]
+                
+                # Try clicking the standard YouTube Skip Ad button region:
+                # 1. Standard player bottom-right
+                pyautogui.click(wx + int(ww * 0.62), wy + int(wh * 0.58))
+                time.sleep(0.08)
+                # 2. Theater mode / wide player bottom-right
+                pyautogui.click(wx + int(ww * 0.85), wy + int(wh * 0.65))
+                time.sleep(0.08)
+                # 3. Fullscreen bottom-right
+                pyautogui.click(wx + int(ww * 0.90), wy + int(wh * 0.88))
+        except Exception:
+            pass
+
+    return f"Skipped YouTube ad in {app_name}, Sir."
+
+
+def youtube_search_in_tab(query: str) -> str:
+    """
+    Search for a video on YouTube within the currently open YouTube tab.
+    Reuses the EXACT same tab without opening new tabs.
+    If no YouTube tab is open, opens YouTube in the default browser.
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    encoded = urllib.parse.quote_plus(query)
+    target_url = f"https://www.youtube.com/results?search_query={encoded}"
+
+    if found:
+        # Re-use the existing tab! Focus address bar via Cmd + L, paste URL, hit Return
+        script = f'''
+        tell application "{app_name}" to activate
+        delay 0.1
+        tell application "System Events"
+            tell process "{app_name}"
+                -- Select address bar in the active tab
+                keystroke "l" using {{command down}}
+                delay 0.2
+            end tell
+        end tell
+        '''
+        _run_applescript(script)
+
+        # Set clipboard and paste
+        proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+        proc.communicate(target_url.encode("utf-8"))
+
+        paste_script = f'''
+        tell application "System Events"
+            tell process "{app_name}"
+                keystroke "v" using {{command down}}
+                delay 0.1
+                key code 36 -- Return
+            end tell
+        end tell
+        '''
+        _run_applescript(paste_script)
+        return f"Searching YouTube for '{query}' in your existing {app_name} tab."
+    else:
+        # Open in default browser
+        import webbrowser
+        webbrowser.open(target_url)
+        return f"Opened YouTube search for '{query}' in your browser."
+
+
+def youtube_play_first_result() -> str:
+    """
+    Click and play the first video result in the active YouTube tab.
+    """
+    found, app_name, title = _find_and_focus_youtube_tab()
+    if not found:
+        return "No active YouTube tab found in your open browsers, Sir."
+
+    script = '''
+    key code 125 -- Down Arrow
+    delay 0.2
+    key code 36 -- Return
+    '''
+    _send_keys_to_browser(app_name, script)
+    return f"Selecting and playing the first result in {app_name}."
 
 
 # ── Background Ad Skipper Daemon ──────────────────────────────
@@ -340,14 +455,18 @@ def start_auto_ad_skipper() -> str:
         global _ad_skipper_running
         while _ad_skipper_running:
             try:
-                youtube_skip_ad()
+                # Only check if YouTube tab is currently running
+                found, app_name, title = _find_and_focus_youtube_tab()
+                if found:
+                    # Silently send Tab + Return to catch any skippable ad
+                    _send_keys_to_browser(app_name, 'key code 48\ndelay 0.05\nkey code 36')
             except Exception:
                 pass
             time.sleep(3)
     
     _ad_skipper_thread = threading.Thread(target=_skipper_loop, daemon=True)
     _ad_skipper_thread.start()
-    return "Auto ad-skipper started. I'll skip ads automatically."
+    return "Auto ad-skipper started. I'll skip ads automatically in your current YouTube tab."
 
 
 def stop_auto_ad_skipper() -> str:
