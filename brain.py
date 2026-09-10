@@ -23,6 +23,18 @@ from skills.web_search import WEB_SEARCH_TOOLS
 from skills.deep_research import DEEP_RESEARCH_TOOLS
 from skills.reminder import REMINDER_TOOLS
 from skills.file_manager import FILE_TOOLS
+from skills.playwright_browser import PLAYWRIGHT_TOOLS
+from skills.youtube_controller import YOUTUBE_TOOLS
+from skills.app_automation import APP_AUTOMATION_TOOLS
+from skills.captcha_handler import CAPTCHA_TOOLS
+from skills.antigravity_backend import ANTIGRAVITY_TOOLS, AntigravityBackend
+from skills.whatsapp_automation import (
+    WHATSAPP_TOOLS,
+    has_pending_whatsapp_message,
+    get_pending_whatsapp_message,
+    whatsapp_confirm_send,
+    whatsapp_cancel_send,
+)
 from skills.memory_extractor import get_facts_for_prompt, extract_facts_from_conversation
 from skills.skill_learner import get_relevant_skills, extract_skill_from_conversation
 
@@ -39,16 +51,22 @@ Your personality:
 
 Your capabilities (use the provided tools/functions):
 - System info: time, date, battery, weather, volume control
-- App control: open, close, and switch between macOS applications
-- Web browsing: open websites, Google/YouTube/GitHub/StackOverflow search
+- App control & automation: open, close, switch apps, type text into any app, and control macOS shortcuts
+- Apple Music: search for songs/artists/playlists (Cmd+F and typing) and control playback (play, pause, next)
+- Antigravity IDE: type commands, code, or prompts directly into the Antigravity IDE
+- Web browsing & CDP automation: open pages, click elements, type in inputs, press keys, read page text, execute JavaScript, take screenshots
+- YouTube tab control: search for videos inside the existing YouTube tab, play/pause, forward/rewind, skip ads, fullscreen, and volume
+- WhatsApp automation: search for contacts on WhatsApp, open chats, draft messages into the input box, and send them after user confirmation
+- CAPTCHA bypass: detect Cloudflare Turnstile, reCAPTCHA v2, hCaptcha and auto-click verification checkboxes
 - Email: read Gmail inbox (supports 'personal' and 'college' account_types), search emails, check unread count
 - LinkedIn: search for job opportunities across platforms
 - Calendar: read today's events, upcoming schedule, create events
 - LeetCode: check progress, get daily challenges, and track DSA consistency
 - Tasks: manage a persistent to-do list (add tasks, complete tasks, remove tasks, list all tasks). Tasks are stored across sessions.
+- Autonomous Antigravity Agent: delegate complex multi-step reasoning or programming queries
 
 Important rules:
-1. When asked to DO something (open app, search, read emails), USE the appropriate tool/function. Don't just describe what you would do.
+1. When asked to DO something (open app, search, read emails, control video, type in app, message on WhatsApp), USE the appropriate tool/function. Don't just describe what you would do.
 2. Keep spoken responses SHORT (1-3 sentences). The user hears this via text-to-speech.
 3. If a tool returns an error about configuration, explain it briefly and suggest how to fix it.
 4. For general conversation, just chat naturally — no tool needed.
@@ -57,6 +75,8 @@ Important rules:
 7. If the user says goodbye, quit, exit, or similar — respond with a farewell but don't call any tool. The system will handle shutdown.
 8. You run locally on macOS. You cannot access the internet directly — use tools for web actions.
 9. Web search: You can now search the web and read webpages! Use the web_search tool for real-time info, and deep_research for thorough investigations.
+10. YouTube control: when the user asks to play, pause, skip, or search within YouTube, use youtube_* tools.
+11. WhatsApp messaging: When asked to send or write a WhatsApp message to someone, ALWAYS use whatsapp_draft_message first. This searches for the contact and writes the message in their chat input without sending. Then ask the user: "Should I send this message, Sir?". When the user confirms (e.g. "yes", "send it", "confirm"), call whatsapp_confirm_send. If they decline ("no", "cancel", "don't send"), call whatsapp_cancel_send. NEVER send without confirmation unless explicitly commanded to bypass confirmation.
 """
 
 
@@ -152,15 +172,40 @@ class Brain:
             LINKEDIN_TOOLS + EMAIL_TOOLS + CALENDAR_TOOLS +
             LEETCODE_TOOLS + TASK_TOOLS +
             WEB_SEARCH_TOOLS + DEEP_RESEARCH_TOOLS +
-            REMINDER_TOOLS + FILE_TOOLS
+            REMINDER_TOOLS + FILE_TOOLS +
+            PLAYWRIGHT_TOOLS + YOUTUBE_TOOLS +
+            APP_AUTOMATION_TOOLS + CAPTCHA_TOOLS +
+            ANTIGRAVITY_TOOLS + WHATSAPP_TOOLS
         )
         self._function_map = {
             tool["name"]: tool["function"]
             for tool in self._all_tools
         }
+        self.antigravity_backend = None
 
     def initialize(self) -> bool:
         """Initialize the AI model and chat session."""
+        dynamic_prompt = JARVIS_SYSTEM_PROMPT + get_facts_for_prompt()
+
+        # If user enabled Antigravity as primary AI backend
+        if Config.USE_ANTIGRAVITY:
+            try:
+                tool_callables = [tool["function"] for tool in self._all_tools]
+                self.antigravity_backend = AntigravityBackend(
+                    api_key=Config.GEMINI_API_KEY,
+                    model=Config.ANTIGRAVITY_MODEL,
+                    system_prompt=dynamic_prompt,
+                    tools=tool_callables,
+                )
+                if self.antigravity_backend.start():
+                    print("  🚀 Jarvis running with Antigravity Agent backend!")
+                    self._initialized = True
+                    return True
+                else:
+                    print("  ⚠️ Antigravity backend start returned False, falling back to standard Gemini...")
+            except Exception as e:
+                print(f"  ⚠️ Antigravity backend initialization failed: {e}. Falling back to standard Gemini...")
+
         pool = []
         if Config.GEMINI_API_KEY: pool.append(Config.GEMINI_API_KEY)
         if Config.GEMINI_API_KEY_FALLBACK: pool.append(Config.GEMINI_API_KEY_FALLBACK)
@@ -186,7 +231,6 @@ class Brain:
             else:
                 self.client = genai.Client(api_key=self.active_api_key)
                 gemini_tools = self._build_gemini_tools()
-                dynamic_prompt = JARVIS_SYSTEM_PROMPT + get_facts_for_prompt()
                 config = types.GenerateContentConfig(
                     system_instruction=dynamic_prompt,
                     tools=gemini_tools,
@@ -309,6 +353,37 @@ class Brain:
         except Exception:
             pass # Fallback to standard processing if regex fails
 
+        # FAST PATH: WhatsApp confirmation handling
+        try:
+            if has_pending_whatsapp_message():
+                text_clean = text_lower.strip().rstrip(".!?,")
+                confirm_words = {"yes", "send", "send it", "yeah", "yep", "sure", "please do", "confirm", "go ahead", "do it", "shoot", "ok", "okay", "send the message"}
+                cancel_words = {"no", "don't", "dont", "cancel", "stop", "nevermind", "abort", "discard", "don't send", "dont send"}
+
+                if text_clean in confirm_words or any(text_clean.startswith(w + " ") for w in confirm_words):
+                    result = whatsapp_confirm_send()
+                    self.memory.add("user", user_input)
+                    self.memory.add("model", result)
+                    return result
+                elif text_clean in cancel_words or any(text_clean.startswith(w + " ") for w in cancel_words):
+                    result = whatsapp_cancel_send()
+                    self.memory.add("user", user_input)
+                    self.memory.add("model", result)
+                    return result
+        except Exception:
+            pass
+
+        # Check if Antigravity primary mode is active
+        if Config.USE_ANTIGRAVITY and self.antigravity_backend:
+            try:
+                final_response = self.antigravity_backend.chat(user_input)
+                self.memory.add("user", user_input)
+                self.memory.add("model", final_response)
+                self._run_background_extraction(user_input, final_response)
+                return final_response
+            except Exception as agy_e:
+                print(f"  ⚠️ Antigravity execution error: {agy_e}. Falling back to standard processing...")
+
         try:
             self._tool_calls_this_turn = 0  # Reset counter
 
@@ -329,8 +404,29 @@ class Brain:
 
         except Exception as e:
             error_msg = str(e)
+
+            # Try Antigravity backend as fallback if Gemini hit quota / rate limit
+            is_rate_limit = any(term in error_msg.lower() for term in ["quota", "rate", "429", "exhausted", "too many requests"])
+            if is_rate_limit:
+                try:
+                    if not self.antigravity_backend:
+                        tool_callables = [tool["function"] for tool in self._all_tools]
+                        self.antigravity_backend = AntigravityBackend(
+                            api_key=Config.GEMINI_API_KEY,
+                            model=Config.ANTIGRAVITY_MODEL,
+                            system_prompt=JARVIS_SYSTEM_PROMPT + get_facts_for_prompt(),
+                            tools=tool_callables,
+                        )
+                        self.antigravity_backend.start()
+                    print("  ⚡ Falling back to Antigravity Agent due to Gemini quota exhaustion...")
+                    final_response = self.antigravity_backend.chat(user_input)
+                    self.memory.add("user", user_input)
+                    self.memory.add("model", final_response)
+                    return final_response
+                except Exception as agy_fallback_err:
+                    print(f"  ⚠️ Antigravity fallback failed: {agy_fallback_err}")
             
-            # Attempt offline fallback first!
+            # Attempt offline fallback
             fallback_response = self._execute_offline_fallback(user_input)
             if fallback_response:
                 return fallback_response

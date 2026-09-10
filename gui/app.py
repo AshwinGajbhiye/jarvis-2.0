@@ -17,7 +17,7 @@ from voice.tts import speak, stop_speaking
 from voice.stt import listen, is_mic_available
 from voice.wakeword import WakeWordDetector
 from utils.helpers import get_greeting
-from skills.leetcode_tracker import sync_daily_dsa_task
+from skills.leetcode_tracker import sync_daily_dsa_task, sync_neetcode_tasks
 
 # ── Custom Signals for Thread Safety ──────────────────────────
 class WorkerSignals(QObject):

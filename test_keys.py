@@ -1,18 +1,36 @@
-import os
-from google import genai
-from config import Config
+#!/usr/bin/env python3
+"""Quick test to verify both API keys work with gemini-2.0-flash-lite."""
 
-def test_key(key, name):
-    print(f"Testing {name}...")
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from google import genai
+
+keys = {
+    "Primary":  os.getenv("GEMINI_API_KEY", ""),
+    "Fallback": os.getenv("GEMINI_API_KEY_FALLBACK", ""),
+}
+model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
+
+print(f"Model: {model}\n")
+
+for label, key in keys.items():
+    if not key:
+        print(f"  ❌ {label}: NOT SET")
+        continue
+
     try:
         client = genai.Client(api_key=key)
         response = client.models.generate_content(
-            model=Config.GEMINI_MODEL,
-            contents="Say hi"
+            model=model,
+            contents="Say hello in one sentence."
         )
-        print(f"  {name} works! Response: {response.text.strip()}")
+        print(f"  ✅ {label}: Working — {response.text.strip()[:80]}")
     except Exception as e:
-        print(f"  {name} failed: {e}")
+        print(f"  ❌ {label}: FAILED — {e}")
 
-test_key(Config.GEMINI_API_KEY, "Primary Key")
-test_key(Config.GEMINI_API_KEY_FALLBACK, "Fallback Key")
+print("\nDone. If both keys show ✅, you're good to run Jarvis!")

@@ -234,6 +234,11 @@ def stackoverflow_search(query: str, browser: str = None) -> str:
         return f"Searching StackOverflow for '{query}'."
 
 
+def search_specific_website(website: str, query: str, browser: str = "default") -> str:
+    """Search for specific content on a specific website using a Google site search."""
+    return google_search(f"site:{website} {query}", browser)
+
+
 # ── Tool definitions for Gemini function calling ─────────────
 BROWSER_TOOLS = [
     {
@@ -363,7 +368,7 @@ BROWSER_TOOLS = [
     {
         "name": "search_specific_website",
         "description": "Search for specific content (like a movie, product, or article) on a specific website using a Google site search.",
-        "function": lambda website, query, browser=None: google_search(f"site:{website} {query}", browser),
+        "function": search_specific_website,
         "parameters": {
             "type": "object",
             "properties": {

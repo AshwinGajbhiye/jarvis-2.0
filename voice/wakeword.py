@@ -20,7 +20,7 @@ class WakeWordDetector:
         self.is_paused = False
         
         # We use the pre-trained "hey jarvis" model included in openwakeword
-        self.oww_model = Model(wakeword_models=["hey_jarvis"], inference_framework="tflite")
+        self.oww_model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
 
     def start(self):
         """Start the background wake word detection thread."""
