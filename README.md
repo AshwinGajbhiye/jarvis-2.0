@@ -20,6 +20,7 @@ A fully local, voice-interactive AI assistant for macOS, inspired by Tony Stark'
 | 📅 **Calendar** | Read today's events, upcoming schedule, create events |
 | 🌤️ **Weather** | Current weather via wttr.in |
 | 🔋 **System Info** | Battery, CPU, memory, volume control |
+| 📱 **Mobile App (Expo Go)** | Native mobile app for iOS/Android with two-way file transfer, voice commands, and remote explorer |
 | 💬 **Conversation** | Natural conversation with context memory |
 
 ---
