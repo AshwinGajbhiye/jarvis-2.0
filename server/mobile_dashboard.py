@@ -1,6 +1,6 @@
 """
-J.A.R.V.I.S. Mobile Dashboard
-Stark Industries HUD-inspired responsive mobile web application.
+J.A.R.V.I.S. Mobile Dashboard & PWA App
+Stark Industries HUD-inspired responsive mobile web & standalone installable application.
 """
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -8,7 +8,18 @@ HTML_CONTENT = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>J.A.R.V.I.S. Mobile Interface</title>
+    <title>J.A.R.V.I.S.</title>
+
+    <!-- PWA & Mobile Standalone Tags -->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/png" href="/icon-192.png">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="J.A.R.V.I.S.">
+    <meta name="theme-color" content="#00f0ff">
+    <meta name="mobile-web-app-capable" content="yes">
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -50,6 +61,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             display: flex;
             flex-direction: column;
             padding-bottom: env(safe-area-inset-bottom, 20px);
+            padding-top: env(safe-area-inset-top, 0px);
         }
 
         /* Top Bar */
@@ -108,6 +120,30 @@ HTML_CONTENT = """<!DOCTYPE html>
             gap: 8px;
             font-family: var(--font-mono);
             font-size: 12px;
+        }
+
+        .install-pwa-btn {
+            background: linear-gradient(135deg, var(--cyan-glow), #0077b6);
+            border: 1px solid var(--cyan-glow);
+            color: #050b14;
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 11px;
+            letter-spacing: 0.5px;
+            border-radius: 6px;
+            padding: 5px 10px;
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
+            animation: pulse-ring 2s infinite alternate;
+        }
+
+        .install-pwa-btn.installed {
+            background: rgba(255, 183, 3, 0.15);
+            border-color: var(--amber-glow);
+            color: var(--amber-glow);
+            box-shadow: none;
+            animation: none;
+            cursor: default;
         }
 
         .status-badge {
@@ -584,7 +620,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             box-shadow: 0 0 25px rgba(0, 240, 255, 0.3);
             border-radius: 12px;
             padding: 20px;
-            max-width: 400px;
+            max-width: 420px;
             width: 100%;
         }
 
@@ -627,6 +663,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             <span class="logo-title">J.A.R.V.I.S.</span>
         </div>
         <div class="system-indicators">
+            <button class="install-pwa-btn" id="install-app-btn" onclick="triggerInstallApp()">📲 INSTALL</button>
             <div class="status-badge" id="system-status-badge">
                 <div class="status-dot"></div>
                 <span id="status-text">ONLINE</span>
@@ -791,6 +828,20 @@ HTML_CONTENT = """<!DOCTYPE html>
         </section>
     </main>
 
+    <!-- PWA Install Modal -->
+    <div class="modal-overlay" id="install-modal">
+        <div class="modal-content">
+            <h3 style="font-family:var(--font-display); color:var(--cyan-glow); margin-bottom:12px; display:flex; align-items:center; gap:8px;">
+                <span>📲</span> INSTALL J.A.R.V.I.S. APP
+            </h3>
+            <div id="install-instructions" style="font-size:14px; line-height:1.6; color:var(--text-main); margin-bottom:16px;">
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:8px;">
+                <button class="send-btn" onclick="closeInstallModal()">GOT IT</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Key Config Modal -->
     <div class="modal-overlay" id="key-modal">
         <div class="modal-content">
@@ -813,6 +864,20 @@ HTML_CONTENT = """<!DOCTYPE html>
         let isRecording = false;
         let mediaRecorder = null;
         let audioChunks = [];
+        let deferredPrompt = null;
+        const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+
+        // Register Service Worker for PWA
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(e => console.log('SW registration note:', e));
+        }
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            const btn = document.getElementById('install-app-btn');
+            if (btn) btn.style.display = 'inline-block';
+        });
 
         // Check URL for ?key=... parameter
         const urlParams = new URLSearchParams(window.location.search);
@@ -827,7 +892,67 @@ HTML_CONTENT = """<!DOCTYPE html>
             fetchFiles('');
             fetchTasks();
             fetchSystemTelemetry();
+            checkStandaloneMode();
         });
+
+        function checkStandaloneMode() {
+            const btn = document.getElementById('install-app-btn');
+            if (isStandalone && btn) {
+                btn.innerText = '⚡ APP MODE';
+                btn.classList.add('installed');
+            }
+        }
+
+        function triggerInstallApp() {
+            if (isStandalone) {
+                showToast('J.A.R.V.I.S. is already running in native App Mode!');
+                return;
+            }
+
+            if (deferredPrompt) {
+                // Native Android / Chrome prompt
+                deferredPrompt.prompt();
+                deferredPrompt.userChoice.then((choiceResult) => {
+                    if (choiceResult.outcome === 'accepted') {
+                        showToast('J.A.R.V.I.S. App Installed!');
+                    }
+                    deferredPrompt = null;
+                });
+            } else {
+                const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+                const container = document.getElementById('install-instructions');
+                if (isIOS) {
+                    container.innerHTML = `
+                        <p style="margin-bottom:12px; font-weight:600;">To install Jarvis as a native app on your iPhone:</p>
+                        <ol style="padding-left:20px; display:flex; flex-direction:column; gap:8px;">
+                            <li>Tap the <strong>Share</strong> button <span style="font-size:18px;">⎋</span> at the bottom of Safari.</li>
+                            <li>Scroll down and tap <strong>"Add to Home Screen"</strong> <span style="font-size:18px;">➕</span>.</li>
+                            <li>Tap <strong>"Add"</strong> in the top right corner.</li>
+                        </ol>
+                        <p style="margin-top:14px; color:var(--cyan-glow); font-size:13px;">
+                            ⭐ Jarvis will appear on your iPhone Home Screen with its own Arc Reactor icon and open full-screen without any browser address bar!
+                        </p>
+                    `;
+                } else {
+                    container.innerHTML = `
+                        <p style="margin-bottom:12px; font-weight:600;">To install Jarvis on your phone:</p>
+                        <ol style="padding-left:20px; display:flex; flex-direction:column; gap:8px;">
+                            <li>Open your mobile browser menu (<strong>⋮</strong> three dots in Chrome).</li>
+                            <li>Tap <strong>"Install app"</strong> or <strong>"Add to Home screen"</strong>.</li>
+                            <li>Confirm installation.</li>
+                        </ol>
+                        <p style="margin-top:14px; color:var(--cyan-glow); font-size:13px;">
+                            ⭐ Jarvis will be installed as a standalone mobile application on your device!
+                        </p>
+                    `;
+                }
+                document.getElementById('install-modal').classList.add('active');
+            }
+        }
+
+        function closeInstallModal() {
+            document.getElementById('install-modal').classList.remove('active');
+        }
 
         function showToast(msg) {
             const toast = document.getElementById('toast-notify');
@@ -898,7 +1023,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                         <a href="${downloadLink}" class="download-action-btn" download>DOWNLOAD</a>
                     </div>
                 `;
-                // Also show in recent download card in files tab
                 displayRecentDownload(fileName, downloadLink);
             }
             bubble.innerHTML = html;

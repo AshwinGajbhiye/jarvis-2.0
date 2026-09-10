@@ -71,7 +71,9 @@ class SetReminderRequest(BaseModel):
     reminder: str
     time_str: str
 
-# ── Web UI Endpoints ──────────────────────────────────────────
+# ── Web UI & PWA App Endpoints ────────────────────────────────
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
 @app.get("/", response_class=HTMLResponse)
 async def mobile_dashboard_root():
     """Serve the Stark-themed responsive mobile web interface."""
@@ -80,6 +82,26 @@ async def mobile_dashboard_root():
 @app.get("/mobile", response_class=HTMLResponse)
 async def mobile_dashboard_alias():
     return HTMLResponse(content=HTML_CONTENT, status_code=200)
+
+@app.get("/manifest.json")
+async def get_manifest():
+    return FileResponse(os.path.join(STATIC_DIR, "manifest.json"), media_type="application/manifest+json")
+
+@app.get("/sw.js")
+async def get_service_worker():
+    return FileResponse(os.path.join(STATIC_DIR, "sw.js"), media_type="application/javascript")
+
+@app.get("/icon-192.png")
+async def get_icon_192():
+    return FileResponse(os.path.join(STATIC_DIR, "icon-192.png"), media_type="image/png")
+
+@app.get("/icon-512.png")
+async def get_icon_512():
+    return FileResponse(os.path.join(STATIC_DIR, "icon-512.png"), media_type="image/png")
+
+@app.get("/apple-touch-icon.png")
+async def get_apple_touch_icon():
+    return FileResponse(os.path.join(STATIC_DIR, "apple-touch-icon.png"), media_type="image/png")
 
 # ── Core API Endpoints ────────────────────────────────────────
 @app.get("/api/ping", dependencies=[Depends(verify_api_key)])
