@@ -157,9 +157,21 @@ def main():
         
     except ImportError as e:
         print_styled(f"\n  ⚠️  Failed to launch GUI: {e}", Colors.RED)
-        print_styled("  Please make sure you have installed the requirements:", Colors.YELLOW)
-        print_styled("  pip install PyQt6 openwakeword", Colors.YELLOW)
-        sys.exit(1)
+        print_styled("  Starting J.A.R.V.I.S. in Headless / Mobile Server mode...", Colors.CYAN)
+        try:
+            from brain import Brain
+            from server.api import start_api_server
+            brain = Brain()
+            start_api_server(brain)
+            print_styled("  Headless mobile server active. Press Ctrl+C to terminate.\n", Colors.GREEN)
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print_styled("\n  Shutting down J.A.R.V.I.S...", Colors.DIM)
+            sys.exit(0)
+        except Exception as err:
+            print_styled(f"  Fatal error: {err}", Colors.RED)
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()

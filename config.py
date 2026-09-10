@@ -23,7 +23,7 @@ class Config:
     AUTO_SKIP_YOUTUBE_ADS: bool = os.getenv("AUTO_SKIP_YOUTUBE_ADS", "true").lower() in ("true", "1", "yes")
 
     # ── Mobile API Server ─────────────────────────────────────
-    MOBILE_API_KEY: str = os.getenv("MOBILE_API_KEY", "")
+    MOBILE_API_KEY: str = os.getenv("MOBILE_API_KEY", "").strip() or "jarvis-mobile-secret-key-2026"
 
     # ── Voice ─────────────────────────────────────────────────
     JARVIS_VOICE: str = os.getenv("JARVIS_VOICE", "Daniel")

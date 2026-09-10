@@ -334,22 +334,32 @@ class Brain:
         Returns:
             Jarvis's response text
         """
-        if not self._initialized:
-            return "My neural circuits aren't connected yet, Sir. Please check the Gemini API key."
-
         try:
             # FAST PATH: Intercept file requests to bypass Gemini latency
             text_lower = user_input.lower().strip()
             import re
-            if re.search(r'\b(file|send me|get)\b', text_lower):
-                match = re.search(r"(?:file\s+)?([a-zA-Z0-9_\-\.]+)(?:\s+file)?", text_lower.replace("send me", "").replace("send", "").replace("get", "").replace("the", "").strip())
-                if match:
-                    filename = match.group(1).strip()
-                    if filename and filename not in ["the", "a", "my", "file", "it"]:
-                        search_and_send = self._function_map.get("search_and_send_file")
-                        if search_and_send:
-                            # Run it directly and return!
-                            return search_and_send(filename=filename)
+            if any(k in text_lower for k in ["file", "send me", "transfer"]) and "whatsapp" not in text_lower:
+                # Check for explicit filename with extension or file keyword
+                fn = None
+                m_ext = re.search(r'(?:send\s+me|send|transfer|get|find\s+and\s+send)\s+(?:the\s+)?(?:file\s+)?["\']?([^"\']+\.[a-zA-Z0-9]{1,5})["\']?', user_input, re.IGNORECASE)
+                if m_ext:
+                    fn = m_ext.group(1).strip()
+                else:
+                    m_kw = re.search(r'(?:send\s+me|send|transfer|get)\s+(?:the\s+)?file\s+["\']?([^"\']+)["\']?', user_input, re.IGNORECASE)
+                    if m_kw:
+                        fn = re.sub(r'\s+to\s+(?:mobile|my\s+phone|phone)$', '', m_kw.group(1).strip(), flags=re.IGNORECASE).strip()
+                    else:
+                        m_to = re.search(r'(?:send\s+me|send)\s+["\']?([^"\']+)["\']?\s+to\s+(?:mobile|my\s+phone|phone)', user_input, re.IGNORECASE)
+                        if m_to:
+                            fn = m_to.group(1).strip()
+                
+                if fn and fn.lower() not in ["the", "a", "my", "file", "it", "to", "message"]:
+                    search_and_send = self._function_map.get("search_and_send_file")
+                    if search_and_send:
+                        result = search_and_send(filename=fn)
+                        self.memory.add("user", user_input)
+                        self.memory.add("model", result)
+                        return result
         except Exception:
             pass # Fallback to standard processing if regex fails
 
@@ -372,6 +382,9 @@ class Brain:
                     return result
         except Exception:
             pass
+
+        if not self._initialized:
+            return "My neural circuits aren't connected yet, Sir. Please check the Gemini API key."
 
         # Check if Antigravity primary mode is active
         if Config.USE_ANTIGRAVITY and self.antigravity_backend:
@@ -639,16 +652,22 @@ class Brain:
                     return f"Offline execution of emails failed: {e}"
         
         # File parsing
-        if "file" in text or "send me" in text or "get" in text:
+        if any(k in text for k in ["file", "send me", "transfer"]) and "whatsapp" not in text:
             search_and_send = self._function_map.get("search_and_send_file")
             if search_and_send:
                 import re
-                # Match "send me the file [name]", "get [name] file", "send [name]"
-                match = re.search(r"(?:file\s+)?([a-zA-Z0-9_\-\.]+)(?:\s+file)?", text.replace("send me", "").replace("send", "").replace("get", "").replace("the", "").strip())
-                if match:
-                    filename = match.group(1).strip()
+                fn = None
+                m_ext = re.search(r'(?:send\s+me|send|transfer|get|find\s+and\s+send)\s+(?:the\s+)?(?:file\s+)?["\']?([^"\']+\.[a-zA-Z0-9]{1,5})["\']?', original_text, re.IGNORECASE)
+                if m_ext:
+                    fn = m_ext.group(1).strip()
+                else:
+                    m_kw = re.search(r'(?:send\s+me|send|transfer|get)\s+(?:the\s+)?file\s+["\']?([^"\']+)["\']?', original_text, re.IGNORECASE)
+                    if m_kw:
+                        fn = re.sub(r'\s+to\s+(?:mobile|my\s+phone|phone)$', '', m_kw.group(1).strip(), flags=re.IGNORECASE).strip()
+                
+                if fn and fn.lower() not in ["the", "a", "my", "file", "it", "to", "message"]:
                     try:
-                        return f"**Offline Mode**\n\n{search_and_send(filename=filename)}"
+                        return f"**Offline Mode**\n\n{search_and_send(filename=fn)}"
                     except Exception as e:
                         return f"Offline execution of file search failed: {e}"
         # YouTube parsing
