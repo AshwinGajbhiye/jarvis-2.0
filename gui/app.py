@@ -1,6 +1,7 @@
 import os
 import sys
 import threading
+import subprocess
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QTextEdit, QLineEdit, QPushButton, QLabel, QFrame,
@@ -447,9 +448,10 @@ class JarvisApp(QMainWindow):
             print(f"⚠️ Failed to start Mobile API server: {e}")
 
     def _setup_hotkeys(self):
-        """Initialize global system-wide hotkeys (Option+Space)."""
+        """Initialize global system-wide hotkeys (Option+Space & Option+R)."""
         self.hotkey_mgr = HotkeyManager(self)
         self.hotkey_mgr.hotkey_triggered.connect(self.signals.toggle_launcher.emit)
+        self.hotkey_mgr.meeting_hotkey_triggered.connect(self._toggle_meeting_recording_from_tray)
         self.hotkey_mgr.start()
 
     def _handle_launcher_submission(self, query: str, silent: bool = True):
@@ -460,27 +462,39 @@ class JarvisApp(QMainWindow):
         """Speak text on demand in a background thread so UI never freezes."""
         threading.Thread(target=speak, args=(text,), daemon=True).start()
 
-    def _setup_tray_icon(self):
-        """Create and configure the macOS menu bar icon with rich controls."""
-        # Create glowing cyan arc reactor tray icon
-        pixmap = QPixmap(36, 36)
+    def _create_tray_pixmap(self, recording: bool = False) -> QPixmap:
+        """Create high-DPI macOS menu bar tray icon (Cyan Arc Reactor or Bright Red Recording Dot)."""
+        pixmap = QPixmap(44, 44)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Outer cyan ring
-        painter.setPen(QPen(QColor('#00FFFF'), 3))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(4, 4, 28, 28)
-        
-        # Inner glowing core
-        painter.setBrush(QBrush(QColor('#00FFFF')))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(13, 13, 10, 10)
+        if recording:
+            # Bright Red Recording Indicator
+            painter.setPen(QPen(QColor('#FF2D55'), 4))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(4, 4, 36, 36)
+            
+            painter.setBrush(QBrush(QColor('#FF2D55')))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(12, 12, 20, 20)
+        else:
+            # Cyan Arc Reactor
+            painter.setPen(QPen(QColor('#00FFFF'), 3))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(4, 4, 36, 36)
+            
+            painter.setBrush(QBrush(QColor('#00FFFF')))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(14, 14, 16, 16)
         painter.end()
+        return pixmap
 
-        # Do not pass 'self' as parent, to avoid inheriting the hidden state of the main window
-        self.tray_icon = QSystemTrayIcon(QIcon(pixmap))
+    def _setup_tray_icon(self):
+        """Create and configure the macOS menu bar icon with rich controls."""
+        # Initialize tray icon with Arc Reactor
+        self.tray_icon = QSystemTrayIcon(QIcon(self._create_tray_pixmap(recording=False)))
+        self.tray_icon.setToolTip("J.A.R.V.I.S. Personal AI Assistant")
+        self.tray_icon.activated.connect(self._on_tray_icon_activated)
         
         # Create context menu with rich cyberpunk styling
         self.tray_menu = QMenu()
@@ -508,10 +522,17 @@ class JarvisApp(QMainWindow):
             }
         """)
         
-        # Status & Quota Display
-        self.status_action = QAction("🤖 J.A.R.V.I.S. (Initializing...)", self)
+        # Status & Backend Display
+        self.status_action = QAction("🤖 J.A.R.V.I.S. (Antigravity Engine Active)", self)
         self.status_action.setEnabled(False)
         self.tray_menu.addAction(self.status_action)
+        
+        self.tray_menu.addSeparator()
+
+        # Meeting & Class Auto-Notes Action (PROMINENT AT TOP!)
+        self.meeting_action = QAction("🎙️ Start Meeting / Class Auto-Notes (⌥R)", self)
+        self.meeting_action.triggered.connect(self._toggle_meeting_recording_from_tray)
+        self.tray_menu.addAction(self.meeting_action)
         
         self.tray_menu.addSeparator()
         
@@ -524,11 +545,6 @@ class JarvisApp(QMainWindow):
         self.open_action = QAction("💬 Open Full Workspace", self)
         self.open_action.triggered.connect(self._force_show_chat)
         self.tray_menu.addAction(self.open_action)
-        
-        # Meeting & Class Auto-Notes Action
-        self.meeting_action = QAction("🎙️ Start Meeting / Class Auto-Notes", self)
-        self.meeting_action.triggered.connect(self._toggle_meeting_recording_from_tray)
-        self.tray_menu.addAction(self.meeting_action)
         
         self.tray_menu.addSeparator()
         
@@ -604,29 +620,65 @@ class JarvisApp(QMainWindow):
             )
         self.autostart_action.setChecked(checked if ok else not checked)
 
+    def _on_tray_icon_activated(self, reason):
+        """Handle direct clicks on the menu bar tray icon."""
+        rec = get_meeting_recorder()
+        # If recording is actively in progress, clicking tray icon stops & summarizes
+        if rec.is_recording():
+            self._toggle_meeting_recording_from_tray()
+
     def _toggle_meeting_recording_from_tray(self):
-        """Start or stop meeting recording from the macOS menu bar."""
+        """Start or stop meeting recording from the macOS menu bar or ⌥R hotkey."""
         rec = get_meeting_recorder()
         if not rec.is_recording():
             ok, msg = rec.start("Class / Meeting")
             if ok:
-                self.meeting_action.setText("🔴 Recording (00:00) - Click to Stop & Summarize")
+                # 1. Update visual icon immediately to BRIGHT RED RECORDING DOT
+                self.tray_icon.setIcon(QIcon(self._create_tray_pixmap(recording=True)))
+                self.tray_icon.setToolTip("🔴 J.A.R.V.I.S. — RECORDING CLASS NOTES (Click icon or ⌥R to Stop)")
+                
+                # 2. Play subtle macOS audio chime
+                try:
+                    subprocess.Popen(["afplay", "/System/Library/Sounds/Tink.aiff"])
+                except Exception:
+                    pass
+
+                # 3. Update tray action text & start timer
+                self.meeting_action.setText("🔴 STOP Recording (00:00) & Extract Notes (⌥R)")
                 self.meeting_timer.start(1000)
+
+                # 4. System notification banner
                 if hasattr(self, 'tray_icon'):
                     self.tray_icon.showMessage(
-                        "J.A.R.V.I.S. Auto-Notes",
-                        "Recording started. Focus on your class; J.A.R.V.I.S. will capture all key points and assignments.",
+                        "J.A.R.V.I.S. Auto-Notes Started",
+                        "🎙️ Recording active! J.A.R.V.I.S. is capturing class concepts & assignments in the background.",
                         QSystemTrayIcon.MessageIcon.Information,
-                        2500
+                        3000
                     )
+                self.signals.update_status.emit("🔴 Recording Class / Meeting...", "#FF2D55")
             else:
+                try:
+                    subprocess.Popen(["afplay", "/System/Library/Sounds/Basso.aiff"])
+                except Exception:
+                    pass
                 if hasattr(self, 'tray_icon'):
-                    self.tray_icon.showMessage("J.A.R.V.I.S. Error", msg, QSystemTrayIcon.MessageIcon.Warning, 2000)
+                    self.tray_icon.showMessage("J.A.R.V.I.S. Recording Error", msg, QSystemTrayIcon.MessageIcon.Warning, 3000)
         else:
-            # Stop recording & trigger multimodal analysis
+            # Stop recording & trigger Antigravity analysis
             self.meeting_timer.stop()
-            self.meeting_action.setText("⏳ Analyzing with Gemini 2.0 Flash...")
+            
+            # Reset icon back to Cyan Arc Reactor immediately
+            self.tray_icon.setIcon(QIcon(self._create_tray_pixmap(recording=False)))
+            self.tray_icon.setToolTip("J.A.R.V.I.S. — Analyzing Class Notes (Antigravity Engine)...")
+            
+            try:
+                subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
+            except Exception:
+                pass
+
+            self.meeting_action.setText("⏳ Analyzing with Antigravity Engine...")
             self.meeting_action.setEnabled(False)
+            self.signals.update_status.emit("Analyzing Notes (Antigravity Engine)...", "#00FFFF")
 
             def process_meeting_async():
                 out_path, duration, title = rec.stop()
@@ -634,17 +686,21 @@ class JarvisApp(QMainWindow):
                     self._reset_meeting_action()
                     return
 
-                self.signals.update_status.emit("Analyzing Meeting Audio...", "#00FFFF")
                 result = analyze_meeting_audio(out_path, title=title)
                 self._reset_meeting_action()
 
                 if result.get("success"):
+                    try:
+                        subprocess.Popen(["afplay", "/System/Library/Sounds/Hero.aiff"])
+                    except Exception:
+                        pass
+
                     md = result.get("markdown", "")
                     num_tasks = len(result.get("action_items_added", []))
                     
                     self.signals.update_chat.emit(Config.JARVIS_NAME, md, "#00FFFF")
                     self.signals.launcher_response.emit(md)
-                    self.signals.update_tasks.emit() # Refresh dashboard task panel!
+                    self.signals.update_tasks.emit()  # Refresh dashboard task panel!
                     self.signals.update_status.emit(f"Class Notes Ready ({num_tasks} tasks added)", "#00FF00")
                     
                     # Auto summon the floating launcher so user sees notes immediately
@@ -652,10 +708,10 @@ class JarvisApp(QMainWindow):
                     
                     if hasattr(self, 'tray_icon'):
                         self.tray_icon.showMessage(
-                            "J.A.R.V.I.S. Class Notes",
-                            f"Meeting notes ready! {num_tasks} assignments/tasks synced to your dashboard.",
+                            "J.A.R.V.I.S. Class Notes Ready",
+                            f"✅ Meeting notes ready! {num_tasks} assignments synced to your dashboard tasks.",
                             QSystemTrayIcon.MessageIcon.Information,
-                            3000
+                            4000
                         )
                 else:
                     err = result.get("error", "Unknown error")
@@ -671,15 +727,17 @@ class JarvisApp(QMainWindow):
             elapsed = rec.get_elapsed_seconds()
             mins = elapsed // 60
             secs = elapsed % 60
-            self.meeting_action.setText(f"🔴 Recording ({mins:02d}:{secs:02d}) - Click to Stop & Summarize")
+            self.meeting_action.setText(f"🔴 STOP Recording ({mins:02d}:{secs:02d}) & Extract Notes (⌥R)")
         else:
             self._reset_meeting_action()
 
     def _reset_meeting_action(self):
         """Reset meeting action back to default ready state."""
         self.meeting_timer.stop()
-        self.meeting_action.setText("🎙️ Start Meeting / Class Auto-Notes")
+        self.meeting_action.setText("🎙️ Start Meeting / Class Auto-Notes (⌥R)")
         self.meeting_action.setEnabled(True)
+        self.tray_icon.setIcon(QIcon(self._create_tray_pixmap(recording=False)))
+        self.tray_icon.setToolTip("J.A.R.V.I.S. Personal AI Assistant")
 
     def _force_show_chat(self):
         """Force the chat window to open so the user can interact manually."""

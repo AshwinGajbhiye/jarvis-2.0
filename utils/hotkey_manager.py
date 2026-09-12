@@ -16,6 +16,7 @@ class HotkeyManager(QObject):
     and emits a Qt signal to toggle the floating launcher.
     """
     hotkey_triggered = pyqtSignal()
+    meeting_hotkey_triggered = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -32,22 +33,24 @@ class HotkeyManager(QObject):
             from pynput import keyboard
 
             # Supported hotkeys:
-            # - <alt>+<space>: Option + Space (⌥Space - Raycast/Alfred style)
-            # - <cmd>+<shift>+j: Cmd + Shift + J (⌘⇧J - Zero conflict with Spotlight)
-            # - <cmd>+<shift>+<space>: Cmd + Shift + Space (⌘⇧Space)
-            # - <cmd>+<alt>+j: Cmd + Option + J (⌘⌥J)
+            # - Launcher: Option+Space (⌥Space), Cmd+Shift+J (⌘⇧J), Cmd+Option+J (⌘⌥J)
+            # - Meeting Auto-Notes: Option+R (⌥R), Cmd+Shift+M (⌘⇧M)
             hotkeys = {
                 '<alt>+<space>': self._on_hotkey_activated,
                 '<cmd>+<shift>+j': self._on_hotkey_activated,
                 '<cmd>+<shift>+<space>': self._on_hotkey_activated,
                 '<cmd>+<alt>+j': self._on_hotkey_activated,
+                '<alt>+r': self._on_meeting_hotkey_activated,
+                '<cmd>+<shift>+m': self._on_meeting_hotkey_activated,
             }
 
             self._listener = keyboard.GlobalHotKeys(hotkeys)
             self._listener.daemon = True
             self._listener.start()
             self._running = True
-            print("  ⌨️  Global hotkeys registered: Option+Space (⌥Space) & Cmd+Shift+J (⌘⇧J)")
+            print("  ⌨️  Global hotkeys registered:")
+            print("      • ⌥Space or ⌘⇧J: Quick Launcher")
+            print("      • ⌥R or ⌘⇧M: Toggle Meeting / Class Auto-Notes")
 
         except Exception as e:
             self._has_accessibility = False
@@ -56,9 +59,12 @@ class HotkeyManager(QObject):
             print("      System Settings -> Privacy & Security -> Accessibility")
 
     def _on_hotkey_activated(self):
-        """Called by pynput on its listener thread when the hotkey is pressed."""
-        # Qt's queued signal emission safely routes this to the main GUI thread
+        """Called by pynput on its listener thread when the launcher hotkey is pressed."""
         self.hotkey_triggered.emit()
+
+    def _on_meeting_hotkey_activated(self):
+        """Called by pynput on its listener thread when the meeting hotkey is pressed."""
+        self.meeting_hotkey_triggered.emit()
 
     def stop(self):
         """Stop listening for global hotkeys."""
