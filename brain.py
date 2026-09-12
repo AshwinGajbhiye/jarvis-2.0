@@ -45,6 +45,7 @@ from skills.email_sender import (
 )
 from skills.cold_outreach_tracker import OUTREACH_TRACKER_TOOLS
 from skills.profile_manager import PROFILE_TOOLS
+from skills.meeting_analyzer import MEETING_TOOLS
 from skills.memory_extractor import get_facts_for_prompt, extract_facts_from_conversation
 from skills.skill_learner import get_relevant_skills, extract_skill_from_conversation
 
@@ -74,6 +75,7 @@ Your capabilities (use the provided tools/functions):
 - Calendar: read today's events, upcoming schedule, create events
 - LeetCode: check progress, get daily challenges, and track DSA consistency
 - Tasks: manage a persistent to-do list (add tasks, complete tasks, remove tasks, list all tasks). Tasks are stored across sessions.
+- Meeting & Lecture Notes: record classes, Google Meets, or discussions (start_meeting_recording, stop_meeting_recording), list notes (list_meeting_notes), and read summaries (get_latest_meeting_summary). Automatically extracts executive summaries, technical concepts, and auto-syncs homework and action items to tasks.
 - Autonomous Antigravity Agent: delegate complex multi-step reasoning or programming queries
 
 Important rules:
@@ -188,7 +190,7 @@ class Brain:
             REMINDER_TOOLS + FILE_TOOLS +
             PLAYWRIGHT_TOOLS + YOUTUBE_TOOLS +
             APP_AUTOMATION_TOOLS + CAPTCHA_TOOLS +
-            ANTIGRAVITY_TOOLS + WHATSAPP_TOOLS
+            ANTIGRAVITY_TOOLS + WHATSAPP_TOOLS + MEETING_TOOLS
         )
         self._function_map = {
             tool["name"]: tool["function"]

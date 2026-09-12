@@ -6,13 +6,15 @@ from PyQt6.QtWidgets import (
     QTextEdit, QLineEdit, QPushButton, QLabel, QFrame,
     QSystemTrayIcon, QMenu
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread, QTimer
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QTextCursor, QPixmap, QPainter, QBrush, QPen, QAction
 
 from gui.floating_reactor import FloatingReactorWindow
 from gui.floating_launcher import FloatingLauncherWindow
 from utils.hotkey_manager import HotkeyManager
 from utils.autostart import is_autostart_enabled, toggle_autostart, enable_autostart, disable_autostart
+from skills.meeting_recorder import get_meeting_recorder
+from skills.meeting_analyzer import analyze_meeting_audio
 
 from config import Config
 from brain import Brain
@@ -433,6 +435,10 @@ class JarvisApp(QMainWindow):
         self._setup_tray_icon()
         self._setup_hotkeys()
 
+        # Meeting Recording Timer for live tray status
+        self.meeting_timer = QTimer(self)
+        self.meeting_timer.timeout.connect(self._update_meeting_tray_timer)
+
         # Start Mobile API Server
         try:
             from server.api import start_api_server
@@ -519,6 +525,11 @@ class JarvisApp(QMainWindow):
         self.open_action.triggered.connect(self._force_show_chat)
         self.tray_menu.addAction(self.open_action)
         
+        # Meeting & Class Auto-Notes Action
+        self.meeting_action = QAction("🎙️ Start Meeting / Class Auto-Notes", self)
+        self.meeting_action.triggered.connect(self._toggle_meeting_recording_from_tray)
+        self.tray_menu.addAction(self.meeting_action)
+        
         self.tray_menu.addSeparator()
         
         # Silent Mode Toggle (Text-First)
@@ -592,6 +603,83 @@ class JarvisApp(QMainWindow):
                 2000
             )
         self.autostart_action.setChecked(checked if ok else not checked)
+
+    def _toggle_meeting_recording_from_tray(self):
+        """Start or stop meeting recording from the macOS menu bar."""
+        rec = get_meeting_recorder()
+        if not rec.is_recording():
+            ok, msg = rec.start("Class / Meeting")
+            if ok:
+                self.meeting_action.setText("🔴 Recording (00:00) - Click to Stop & Summarize")
+                self.meeting_timer.start(1000)
+                if hasattr(self, 'tray_icon'):
+                    self.tray_icon.showMessage(
+                        "J.A.R.V.I.S. Auto-Notes",
+                        "Recording started. Focus on your class; J.A.R.V.I.S. will capture all key points and assignments.",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        2500
+                    )
+            else:
+                if hasattr(self, 'tray_icon'):
+                    self.tray_icon.showMessage("J.A.R.V.I.S. Error", msg, QSystemTrayIcon.MessageIcon.Warning, 2000)
+        else:
+            # Stop recording & trigger multimodal analysis
+            self.meeting_timer.stop()
+            self.meeting_action.setText("⏳ Analyzing with Gemini 2.0 Flash...")
+            self.meeting_action.setEnabled(False)
+
+            def process_meeting_async():
+                out_path, duration, title = rec.stop()
+                if not out_path or duration < 1.0:
+                    self._reset_meeting_action()
+                    return
+
+                self.signals.update_status.emit("Analyzing Meeting Audio...", "#00FFFF")
+                result = analyze_meeting_audio(out_path, title=title)
+                self._reset_meeting_action()
+
+                if result.get("success"):
+                    md = result.get("markdown", "")
+                    num_tasks = len(result.get("action_items_added", []))
+                    
+                    self.signals.update_chat.emit(Config.JARVIS_NAME, md, "#00FFFF")
+                    self.signals.launcher_response.emit(md)
+                    self.signals.update_tasks.emit() # Refresh dashboard task panel!
+                    self.signals.update_status.emit(f"Class Notes Ready ({num_tasks} tasks added)", "#00FF00")
+                    
+                    # Auto summon the floating launcher so user sees notes immediately
+                    self.signals.toggle_launcher.emit()
+                    
+                    if hasattr(self, 'tray_icon'):
+                        self.tray_icon.showMessage(
+                            "J.A.R.V.I.S. Class Notes",
+                            f"Meeting notes ready! {num_tasks} assignments/tasks synced to your dashboard.",
+                            QSystemTrayIcon.MessageIcon.Information,
+                            3000
+                        )
+                else:
+                    err = result.get("error", "Unknown error")
+                    self.signals.update_status.emit("Meeting analysis failed", "#FF0000")
+                    self.signals.update_chat.emit("System", f"⚠️ Meeting analysis failed: {err}", "#FF0000")
+
+            threading.Thread(target=process_meeting_async, daemon=True).start()
+
+    def _update_meeting_tray_timer(self):
+        """Update the menu bar item text with live recording elapsed time."""
+        rec = get_meeting_recorder()
+        if rec.is_recording():
+            elapsed = rec.get_elapsed_seconds()
+            mins = elapsed // 60
+            secs = elapsed % 60
+            self.meeting_action.setText(f"🔴 Recording ({mins:02d}:{secs:02d}) - Click to Stop & Summarize")
+        else:
+            self._reset_meeting_action()
+
+    def _reset_meeting_action(self):
+        """Reset meeting action back to default ready state."""
+        self.meeting_timer.stop()
+        self.meeting_action.setText("🎙️ Start Meeting / Class Auto-Notes")
+        self.meeting_action.setEnabled(True)
 
     def _force_show_chat(self):
         """Force the chat window to open so the user can interact manually."""
