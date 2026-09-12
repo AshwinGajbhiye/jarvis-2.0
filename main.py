@@ -69,7 +69,8 @@ def print_styled(text: str, color: str = Colors.WHITE):
 
 def boot_sequence():
     """Display the Jarvis startup sequence."""
-    os.system("clear")
+    if sys.stdout.isatty():
+        os.system("clear")
     print(JARVIS_LOGO)
     time.sleep(0.3)
 
@@ -141,19 +142,27 @@ def print_help():
 
 def main():
     """Launch the J.A.R.V.I.S. Graphical Interface."""
+    import argparse
+    parser = argparse.ArgumentParser(description="J.A.R.V.I.S. AI Assistant")
+    parser.add_argument("--minimized", "--daemon", action="store_true", help="Run silently in the macOS menu bar without showing the main window")
+    args, _ = parser.parse_known_args()
     
     # ── Try to import GUI components ──────────────────────────
     try:
         from gui.app import run_gui
         
         # Print a simple boot message to terminal
-        os.system("clear")
-        print(JARVIS_LOGO)
-        print_styled("  Launching J.A.R.V.I.S. GUI...", Colors.GREEN)
-        print_styled("  (Leave this terminal running. The app will open in a new window.)\n", Colors.DIM)
+        if not args.minimized:
+            if sys.stdout.isatty():
+                os.system("clear")
+            print(JARVIS_LOGO)
+            print_styled("  Launching J.A.R.V.I.S. GUI...", Colors.GREEN)
+            print_styled("  (Leave this terminal running. The app will open in a new window.)\n", Colors.DIM)
+        else:
+            print_styled("  Launching J.A.R.V.I.S. in Menu Bar Daemon mode...", Colors.CYAN)
         
         # Start GUI (blocks until window is closed)
-        run_gui()
+        run_gui(minimized=args.minimized)
         
     except ImportError as e:
         print_styled(f"\n  ⚠️  Failed to launch GUI: {e}", Colors.RED)

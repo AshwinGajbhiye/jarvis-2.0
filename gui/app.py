@@ -7,9 +7,12 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon, QMenu
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
-from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QTextCursor, QPixmap, QPainter, QBrush, QAction
+from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QTextCursor, QPixmap, QPainter, QBrush, QPen, QAction
 
 from gui.floating_reactor import FloatingReactorWindow
+from gui.floating_launcher import FloatingLauncherWindow
+from utils.hotkey_manager import HotkeyManager
+from utils.autostart import is_autostart_enabled, toggle_autostart, enable_autostart, disable_autostart
 
 from config import Config
 from brain import Brain
@@ -30,6 +33,8 @@ class WorkerSignals(QObject):
     shutdown_app = pyqtSignal()
     show_reactor = pyqtSignal()
     hide_reactor = pyqtSignal()
+    launcher_response = pyqtSignal(str)      # send response to floating launcher
+    toggle_launcher = pyqtSignal()           # hotkey trigger to toggle launcher
 
 # ── Worker Thread for Jarvis Logic ────────────────────────────
 class JarvisWorker(QThread):
@@ -39,6 +44,7 @@ class JarvisWorker(QThread):
         self.signals = signals
         self.mic_available = is_mic_available()
         self.brain_ok = False
+        self.silent_mode = False  # If True, text-only (no blocking TTS audio)
         
         # We use a queue to pass manual text input from the GUI to the worker thread
         import queue
@@ -95,7 +101,8 @@ class JarvisWorker(QThread):
                 
             self.signals.update_chat.emit(Config.JARVIS_NAME, greeting, "#00FFFF")
             self.signals.update_avatar.emit("speaking")
-            speak(greeting, block=True)
+            if not self.silent_mode:
+                speak(greeting, block=True)
             self.signals.update_avatar.emit("idle")
             
             # Seed the brain's memory with the greeting so it understands context if the user says "yes"
@@ -151,8 +158,14 @@ class JarvisWorker(QThread):
                     continue
                     
             # Check for manual text input
+            silent = False
             if not self.input_queue.empty():
-                user_text = self.input_queue.get()
+                item = self.input_queue.get()
+                if isinstance(item, tuple):
+                    user_text, silent = item
+                else:
+                    user_text = item
+                    silent = False
                 
             if not user_text:
                 self.msleep(100) # Sleep briefly to prevent CPU hogging
@@ -191,7 +204,8 @@ class JarvisWorker(QThread):
                     if "No recent accepted submissions found" in progress:
                         nudge_msg = f"Excuse me, Sir. It has been a while since your last LeetCode submission. I highly recommend spending some time on Data Structures and Algorithms to maintain your consistency."
                         self.signals.update_chat.emit(Config.JARVIS_NAME, nudge_msg, "#00FFFF")
-                        speak(nudge_msg, block=True)
+                        if not self.silent_mode:
+                            speak(nudge_msg, block=True)
             # ---------------------------
 
             # Process with AI
@@ -204,13 +218,19 @@ class JarvisWorker(QThread):
                 self.signals.update_quota.emit(self.brain.get_quota_string())
                 
                 self.signals.update_chat.emit(Config.JARVIS_NAME, response, "#00FFFF")
-                self.signals.update_status.emit("Speaking...", "#00FFFF")
-                self.signals.update_avatar.emit("speaking")
+                self.signals.launcher_response.emit(response)
                 
-                # Speak response
-                speak(response, block=True)
+                # Speak response only if not silent!
+                if not silent and not self.silent_mode:
+                    self.signals.update_status.emit("Speaking...", "#00FFFF")
+                    self.signals.update_avatar.emit("speaking")
+                    speak(response, block=True)
+                else:
+                    self.signals.update_status.emit("Ready", "#00FF00")
+                    self.signals.update_avatar.emit("idle")
             else:
                 self.signals.update_chat.emit("System", "Cannot process command without AI brain.", "#FF0000")
+                self.signals.launcher_response.emit("⚠️ Cannot process command: AI brain is offline.")
                 self.signals.update_avatar.emit("error")
 
             # Refresh task panel after every response (task might have been added/completed)
@@ -374,13 +394,14 @@ class JarvisApp(QMainWindow):
 
         main_layout.addWidget(self.task_panel)
 
-        # Setup System Tray Icon
-        self._setup_tray_icon()
-
         # Floating Arc Reactor Overlay (always on top, follows user)
         self.floating_reactor = FloatingReactorWindow()
         self.floating_reactor.hide()  # Hidden by default
         self.floating_reactor.clicked.connect(self._toggle_chat_window)
+
+        # Floating Command Launcher (Spotlight / Raycast style)
+        self.launcher = FloatingLauncherWindow()
+        self.launcher.hide()
 
         # Setup Worker
         self.brain = Brain()
@@ -392,14 +413,25 @@ class JarvisApp(QMainWindow):
         self.signals.update_avatar.connect(self.floating_reactor.set_state)
         self.signals.update_tasks.connect(self.refresh_tasks)
         self.signals.ready_for_input.connect(lambda: self.input_field.setEnabled(True))
-        self.signals.shutdown_app.connect(self.close)
+        self.signals.shutdown_app.connect(self._quit_application)
         
+        # Launcher signals
+        self.signals.launcher_response.connect(self.launcher.set_response)
+        self.signals.toggle_launcher.connect(self.launcher.toggle_visibility)
+        self.launcher.submitted.connect(self._handle_launcher_submission)
+        self.launcher.open_dashboard_requested.connect(self._force_show_chat)
+        self.launcher.speak_requested.connect(self._speak_text_async)
+
         # Reactor visibility signals
         self.signals.show_reactor.connect(self._show_floating_reactor)
         self.signals.hide_reactor.connect(self.floating_reactor.hide)
         
         self.worker = JarvisWorker(self.brain, self.signals)
         self.worker.start()
+
+        # Setup System Tray Icon & Global Hotkeys
+        self._setup_tray_icon()
+        self._setup_hotkeys()
 
         # Start Mobile API Server
         try:
@@ -408,41 +440,158 @@ class JarvisApp(QMainWindow):
         except Exception as e:
             print(f"⚠️ Failed to start Mobile API server: {e}")
 
+    def _setup_hotkeys(self):
+        """Initialize global system-wide hotkeys (Option+Space)."""
+        self.hotkey_mgr = HotkeyManager(self)
+        self.hotkey_mgr.hotkey_triggered.connect(self.signals.toggle_launcher.emit)
+        self.hotkey_mgr.start()
+
+    def _handle_launcher_submission(self, query: str, silent: bool = True):
+        """Forward query from floating launcher to worker queue in silent/fast mode."""
+        self.worker.input_queue.put((query, silent))
+
+    def _speak_text_async(self, text: str):
+        """Speak text on demand in a background thread so UI never freezes."""
+        threading.Thread(target=speak, args=(text,), daemon=True).start()
+
     def _setup_tray_icon(self):
-        """Create and configure the macOS menu bar icon."""
-        # Create a simple glowing blue circle icon
-        pixmap = QPixmap(64, 64)
+        """Create and configure the macOS menu bar icon with rich controls."""
+        # Create glowing cyan arc reactor tray icon
+        pixmap = QPixmap(36, 36)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Outer cyan ring
+        painter.setPen(QPen(QColor('#00FFFF'), 3))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(4, 4, 28, 28)
+        
+        # Inner glowing core
         painter.setBrush(QBrush(QColor('#00FFFF')))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(16, 16, 32, 32)
+        painter.drawEllipse(13, 13, 10, 10)
         painter.end()
 
         # Do not pass 'self' as parent, to avoid inheriting the hidden state of the main window
         self.tray_icon = QSystemTrayIcon(QIcon(pixmap))
         
-        # Create context menu
+        # Create context menu with rich cyberpunk styling
         self.tray_menu = QMenu()
+        self.tray_menu.setStyleSheet("""
+            QMenu {
+                background-color: #0D1520;
+                color: #E6EDF3;
+                border: 1px solid #1A2536;
+                padding: 4px;
+                font-family: 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
+                font-size: 13px;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #00FFFF;
+                color: #0A0F14;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #1A2536;
+                margin: 4px 0px;
+            }
+        """)
         
-        self.status_action = QAction("Status: Initializing...", self)
+        # Status & Quota Display
+        self.status_action = QAction("🤖 J.A.R.V.I.S. (Initializing...)", self)
         self.status_action.setEnabled(False)
         self.tray_menu.addAction(self.status_action)
         
         self.tray_menu.addSeparator()
         
-        self.open_action = QAction("Open Jarvis Chat", self)
+        # Quick Launcher (Option+Space or Cmd+Shift+J)
+        self.launcher_action = QAction("⚡ Quick Launcher (⌥Space or ⌘⇧J)", self)
+        self.launcher_action.triggered.connect(self.launcher.summon)
+        self.tray_menu.addAction(self.launcher_action)
+        
+        # Open Full Chat
+        self.open_action = QAction("💬 Open Full Workspace", self)
         self.open_action.triggered.connect(self._force_show_chat)
         self.tray_menu.addAction(self.open_action)
         
         self.tray_menu.addSeparator()
         
-        self.quit_action = QAction("Quit J.A.R.V.I.S.", self)
-        self.quit_action.triggered.connect(self.close)
+        # Silent Mode Toggle (Text-First)
+        self.silent_action = QAction("🔇 Silent Mode (No Voice Audio)", self)
+        self.silent_action.setCheckable(True)
+        self.silent_action.setChecked(self.worker.silent_mode)
+        self.silent_action.triggered.connect(self._toggle_silent_mode)
+        self.tray_menu.addAction(self.silent_action)
+        
+        # Wake Word Toggle
+        self.wakeword_action = QAction("🎤 Wake Word ('Hey Jarvis')", self)
+        self.wakeword_action.setCheckable(True)
+        self.wakeword_action.setChecked(True)
+        self.wakeword_action.triggered.connect(self._toggle_wakeword)
+        self.tray_menu.addAction(self.wakeword_action)
+        
+        self.tray_menu.addSeparator()
+        
+        # Refresh Tasks
+        self.tasks_action = QAction("📋 Refresh Tasks & DSA", self)
+        self.tasks_action.triggered.connect(self.refresh_tasks)
+        self.tray_menu.addAction(self.tasks_action)
+        
+        # Auto-start on macOS Login
+        self.autostart_action = QAction("🚀 Launch on Mac Startup", self)
+        self.autostart_action.setCheckable(True)
+        self.autostart_action.setChecked(is_autostart_enabled())
+        self.autostart_action.triggered.connect(self._toggle_autostart)
+        self.tray_menu.addAction(self.autostart_action)
+        
+        self.tray_menu.addSeparator()
+        
+        # Clean Quit
+        self.quit_action = QAction("❌ Quit J.A.R.V.I.S.", self)
+        self.quit_action.triggered.connect(self._quit_application)
         self.tray_menu.addAction(self.quit_action)
         
         self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.show()
+
+    def _toggle_silent_mode(self, checked: bool):
+        """Toggle silent text-first mode on worker."""
+        self.worker.silent_mode = checked
+        state_text = "enabled (Text only)" if checked else "disabled (Voice on)"
+        if hasattr(self, 'tray_icon'):
+            self.tray_icon.showMessage(
+                "J.A.R.V.I.S.",
+                f"Silent mode {state_text}.",
+                QSystemTrayIcon.MessageIcon.Information,
+                1500
+            )
+
+    def _toggle_wakeword(self, checked: bool):
+        """Toggle wake word detection."""
+        if checked:
+            self.worker.wakeword.resume()
+        else:
+            self.worker.wakeword.pause()
+
+    def _toggle_autostart(self, checked: bool):
+        """Toggle launch at login."""
+        if checked:
+            ok, msg = enable_autostart()
+        else:
+            ok, msg = disable_autostart()
+        if hasattr(self, 'tray_icon'):
+            self.tray_icon.showMessage(
+                "J.A.R.V.I.S.",
+                msg,
+                QSystemTrayIcon.MessageIcon.Information,
+                2000
+            )
+        self.autostart_action.setChecked(checked if ok else not checked)
 
     def _force_show_chat(self):
         """Force the chat window to open so the user can interact manually."""
@@ -572,25 +721,44 @@ class JarvisApp(QMainWindow):
             print(f"  ⚠️  Could not move chat to active space: {e}")
 
     def closeEvent(self, event):
-        """Handle application shutdown."""
+        """Minimize to menu bar tray instead of killing the application."""
+        event.ignore()
+        self.hide()
+        if hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
+            self.tray_icon.showMessage(
+                "J.A.R.V.I.S.",
+                "Running in menu bar. Press Option+Space anytime to summon.",
+                QSystemTrayIcon.MessageIcon.Information,
+                1500
+            )
+
+    def _quit_application(self):
+        """Clean shutdown of background hotkeys, threads, and process."""
+        if hasattr(self, 'hotkey_mgr'):
+            self.hotkey_mgr.stop()
         self.set_status("Shutting down...", "#FF0000")
         stop_speaking()
-        # Force a hard exit to prevent hanging on blocking background C/C++ threads (like PyAudio)
         import os
         os._exit(0)
 
-def run_gui():
+def run_gui(minimized: bool = False):
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Keep app running in background
     window = JarvisApp()
     
-    # Show the chat window initially upon launch
-    window._move_to_active_space()
-    window.show()
-    window.raise_()
-    window.activateWindow()
-    
-    # Show the floating reactor globe initially upon launch
-    window._show_floating_reactor()
+    if not minimized:
+        # Show the chat window initially upon launch
+        window._move_to_active_space()
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        
+        # Show the floating reactor globe initially upon launch
+        window._show_floating_reactor()
+    else:
+        window.worker.silent_mode = True
+        if hasattr(window, 'silent_action'):
+            window.silent_action.setChecked(True)
+        print("  ✨ J.A.R.V.I.S. running in the macOS menu bar. Press Option+Space (⌥Space) anytime to summon.\n")
     
     sys.exit(app.exec())

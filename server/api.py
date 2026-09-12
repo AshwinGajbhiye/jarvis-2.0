@@ -21,6 +21,17 @@ from skills.task_manager import list_tasks as get_tasks_skill, add_task, complet
 from skills.reminder import list_reminders as get_reminders_skill, set_reminder
 from skills.memory_extractor import get_facts_for_prompt
 from skills.file_manager import get_queued_file, queue_file_for_transfer
+from skills.linkedin_jobs import search_linkedin_jobs_data, get_cached_jobs, get_linkedin_job_details
+from skills.job_search import search_web_jobs, get_cached_web_jobs, find_company_contacts
+from skills.email_sender import (
+    draft_cold_email,
+    confirm_send_cold_email,
+    cancel_send_cold_email,
+    preview_pending_cold_email,
+    get_pending_cold_email,
+)
+from skills.cold_outreach_tracker import list_cold_applications, get_outreach_analytics
+from skills.profile_manager import get_user_profile, update_user_profile
 from server.mobile_dashboard import HTML_CONTENT
 
 app = FastAPI(title="Jarvis Mobile Suite & API")
@@ -70,6 +81,18 @@ class CompleteTaskRequest(BaseModel):
 class SetReminderRequest(BaseModel):
     reminder: str
     time_str: str
+
+class ColdEmailDraftRequest(BaseModel):
+    to_email: str
+    recipient_name: Optional[str] = ""
+    company: str
+    job_title: str
+    job_details: Optional[str] = ""
+    custom_notes: Optional[str] = ""
+    attach_resume: Optional[bool] = True
+
+class ColdEmailConfirmRequest(BaseModel):
+    attach_resume: Optional[bool] = True
 
 # ── Web UI & PWA App Endpoints ────────────────────────────────
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -253,7 +276,12 @@ async def download_file(
     return FileResponse(
         real_path,
         filename=os.path.basename(real_path),
-        media_type="application/octet-stream"
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{os.path.basename(real_path)}"',
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Expose-Headers": "Content-Disposition"
+        }
     )
 
 @app.post("/api/upload", dependencies=[Depends(verify_api_key)])
@@ -406,6 +434,64 @@ def api_list_reminders():
 def api_set_reminder(req: SetReminderRequest):
     result = set_reminder(req.reminder, req.time_str)
     return {"status": "ok", "result": result, "reminders": get_reminders_skill()}
+
+# ── Job Search & Cold Outreach Endpoints ──────────────────────
+@app.get("/api/jobs/linkedin", dependencies=[Depends(verify_api_key)])
+def api_search_linkedin(
+    title: str = Query(..., description="Target job title"),
+    location: str = Query("Remote", description="Job location"),
+    limit: int = Query(5, description="Max results"),
+):
+    summary = search_linkedin_jobs_data(job_title=title, location=location, max_results=limit)
+    return {"summary": summary, "jobs": get_cached_jobs()}
+
+@app.get("/api/jobs/web", dependencies=[Depends(verify_api_key)])
+def api_search_web_jobs(
+    title: str = Query(..., description="Target job title"),
+    location: str = Query("Remote", description="Job location"),
+    keywords: str = Query("", description="Keywords"),
+    limit: int = Query(5, description="Max results"),
+):
+    summary = search_web_jobs(job_title=title, location=location, keywords=keywords, max_results=limit)
+    return {"summary": summary, "jobs": get_cached_web_jobs()}
+
+@app.get("/api/jobs/contacts", dependencies=[Depends(verify_api_key)])
+def api_find_contacts(
+    company: str = Query(..., description="Company name"),
+    domain: str = Query("", description="Company website domain"),
+):
+    return {"contacts": find_company_contacts(company_name=company, company_domain=domain)}
+
+@app.get("/api/profile", dependencies=[Depends(verify_api_key)])
+def api_get_profile():
+    return {"profile": get_user_profile()}
+
+@app.post("/api/cold-email/draft", dependencies=[Depends(verify_api_key)])
+def api_draft_cold_email(req: ColdEmailDraftRequest):
+    result = draft_cold_email(
+        to_email=req.to_email,
+        recipient_name=req.recipient_name or "",
+        company=req.company,
+        job_title=req.job_title,
+        job_details=req.job_details or "",
+        custom_notes=req.custom_notes or "",
+        attach_resume=req.attach_resume if req.attach_resume is not None else True,
+    )
+    return {"status": "ok", "result": result, "pending": get_pending_cold_email()}
+
+@app.post("/api/cold-email/confirm", dependencies=[Depends(verify_api_key)])
+def api_confirm_cold_email(req: ColdEmailConfirmRequest):
+    result = confirm_send_cold_email(attach_resume=req.attach_resume)
+    return {"status": "ok", "result": result}
+
+@app.post("/api/cold-email/cancel", dependencies=[Depends(verify_api_key)])
+def api_cancel_cold_email():
+    result = cancel_send_cold_email()
+    return {"status": "ok", "result": result}
+
+@app.get("/api/cold-email/history", dependencies=[Depends(verify_api_key)])
+def api_cold_email_history(status: str = Query("all")):
+    return {"summary": list_cold_applications(status_filter=status), "analytics": get_outreach_analytics()}
 
 # ── Server Launch Helper ──────────────────────────────────────
 def get_local_ip() -> str:

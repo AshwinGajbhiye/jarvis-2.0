@@ -35,6 +35,16 @@ from skills.whatsapp_automation import (
     whatsapp_confirm_send,
     whatsapp_cancel_send,
 )
+from skills.job_search import JOB_SEARCH_TOOLS
+from skills.email_sender import (
+    COLD_EMAIL_TOOLS,
+    has_pending_cold_email,
+    get_pending_cold_email,
+    confirm_send_cold_email,
+    cancel_send_cold_email,
+)
+from skills.cold_outreach_tracker import OUTREACH_TRACKER_TOOLS
+from skills.profile_manager import PROFILE_TOOLS
 from skills.memory_extractor import get_facts_for_prompt, extract_facts_from_conversation
 from skills.skill_learner import get_relevant_skills, extract_skill_from_conversation
 
@@ -59,7 +69,8 @@ Your capabilities (use the provided tools/functions):
 - WhatsApp automation: search for contacts on WhatsApp, open chats, draft messages into the input box, and send them after user confirmation
 - CAPTCHA bypass: detect Cloudflare Turnstile, reCAPTCHA v2, hCaptcha and auto-click verification checkboxes
 - Email: read Gmail inbox (supports 'personal' and 'college' account_types), search emails, check unread count
-- LinkedIn: search for job opportunities across platforms
+- Cold Email Outreach: draft personalized cold outreach emails with resume attachments (draft_cold_email), view/update candidate profile (view_candidate_profile, update_user_profile), track applications (list_cold_applications, get_outreach_analytics), and safely send after user confirmation
+- Job Search: search real-time opportunities on LinkedIn (search_linkedin_jobs_data) and across the web (search_web_jobs), fetch full job specifications (get_linkedin_job_details), and find hiring manager contacts (find_company_contacts)
 - Calendar: read today's events, upcoming schedule, create events
 - LeetCode: check progress, get daily challenges, and track DSA consistency
 - Tasks: manage a persistent to-do list (add tasks, complete tasks, remove tasks, list all tasks). Tasks are stored across sessions.
@@ -77,6 +88,7 @@ Important rules:
 9. Web search: You can now search the web and read webpages! Use the web_search tool for real-time info, and deep_research for thorough investigations.
 10. YouTube control: when the user asks to play, pause, skip, or search within YouTube, use youtube_* tools.
 11. WhatsApp messaging: When asked to send or write a WhatsApp message to someone, ALWAYS use whatsapp_draft_message first. This searches for the contact and writes the message in their chat input without sending. Then ask the user: "Should I send this message, Sir?". When the user confirms (e.g. "yes", "send it", "confirm"), call whatsapp_confirm_send. If they decline ("no", "cancel", "don't send"), call whatsapp_cancel_send. NEVER send without confirmation unless explicitly commanded to bypass confirmation.
+12. Cold Emailing: When asked to write or send a cold email for a job or recruiter, ALWAYS use draft_cold_email first. Present the draft preview (recipient, role, company, subject) and ask: "Should I send this cold email now, Sir?". When the user confirms ("yes", "send it", "confirm"), call confirm_send_cold_email. If they decline ("no", "cancel"), call cancel_send_cold_email.
 """
 
 
@@ -169,8 +181,9 @@ class Brain:
         # Collect all tool definitions and function mappings
         self._all_tools = (
             SYSTEM_TOOLS + APP_TOOLS + BROWSER_TOOLS +
-            LINKEDIN_TOOLS + EMAIL_TOOLS + CALENDAR_TOOLS +
-            LEETCODE_TOOLS + TASK_TOOLS +
+            LINKEDIN_TOOLS + JOB_SEARCH_TOOLS +
+            EMAIL_TOOLS + COLD_EMAIL_TOOLS + OUTREACH_TRACKER_TOOLS + PROFILE_TOOLS +
+            CALENDAR_TOOLS + LEETCODE_TOOLS + TASK_TOOLS +
             WEB_SEARCH_TOOLS + DEEP_RESEARCH_TOOLS +
             REMINDER_TOOLS + FILE_TOOLS +
             PLAYWRIGHT_TOOLS + YOUTUBE_TOOLS +
@@ -377,6 +390,33 @@ class Brain:
                     return result
                 elif text_clean in cancel_words or any(text_clean.startswith(w + " ") for w in cancel_words):
                     result = whatsapp_cancel_send()
+                    self.memory.add("user", user_input)
+                    self.memory.add("model", result)
+                    return result
+        except Exception:
+            pass
+
+        # FAST PATH: Cold Email confirmation handling
+        try:
+            if has_pending_cold_email():
+                text_clean = text_lower.strip().rstrip(".!?,")
+                email_confirm_words = {
+                    "yes", "send", "send it", "yeah", "yep", "sure", "please do",
+                    "confirm", "go ahead", "do it", "shoot", "ok", "okay",
+                    "send the email", "send email", "send cold email", "dispatch"
+                }
+                email_cancel_words = {
+                    "no", "don't", "dont", "cancel", "stop", "nevermind",
+                    "abort", "discard", "don't send", "dont send", "cancel draft"
+                }
+
+                if text_clean in email_confirm_words or any(text_clean.startswith(w + " ") for w in email_confirm_words):
+                    result = confirm_send_cold_email()
+                    self.memory.add("user", user_input)
+                    self.memory.add("model", result)
+                    return result
+                elif text_clean in email_cancel_words or any(text_clean.startswith(w + " ") for w in email_cancel_words):
+                    result = cancel_send_cold_email()
                     self.memory.add("user", user_input)
                     self.memory.add("model", result)
                     return result

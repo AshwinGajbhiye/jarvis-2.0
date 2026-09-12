@@ -1020,7 +1020,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 html += `
                     <div class="chat-file-card">
                         <span class="chat-file-name">📦 ${fileName || 'Mac File'}</span>
-                        <a href="${downloadLink}" class="download-action-btn" download>DOWNLOAD</a>
+                        <a href="${downloadLink}" class="download-action-btn" target="_blank" rel="noopener noreferrer" download="${fileName || 'file'}">DOWNLOAD</a>
                     </div>
                 `;
                 displayRecentDownload(fileName, downloadLink);
@@ -1177,7 +1177,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             content.innerHTML = `
                 <div class="chat-file-card">
                     <span class="chat-file-name">📦 ${filename}</span>
-                    <a href="${url}" class="download-action-btn" download>DOWNLOAD TO PHONE</a>
+                    <a href="${url}" class="download-action-btn" target="_blank" rel="noopener noreferrer" download>DOWNLOAD TO PHONE</a>
                 </div>
             `;
         }
@@ -1219,7 +1219,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     el.className = 'file-item';
                     const icon = item.is_dir ? '📁' : '📄';
                     const downloadBtn = item.is_dir ? '' : `
-                        <a href="${item.download_url}&api_key=${encodeURIComponent(apiKey)}" class="download-action-btn" download onclick="event.stopPropagation()">GET</a>
+                        <a href="${item.download_url}&api_key=${encodeURIComponent(apiKey)}" class="download-action-btn" target="_blank" rel="noopener noreferrer" download="${item.name}" onclick="event.stopPropagation()">GET</a>
                     `;
 
                     el.innerHTML = `

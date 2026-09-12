@@ -36,7 +36,7 @@ class Config:
     JARVIS_NAME: str = os.getenv("JARVIS_NAME", "Jarvis")
     USER_NAME: str = os.getenv("USER_NAME", "Sir")
 
-    # ── Gmail ─────────────────────────────────────────────────
+    # ── Gmail & Email Sending ──────────────────────────────────
     GMAIL_CREDENTIALS_PATH: str = os.getenv(
         "GMAIL_CREDENTIALS_PATH", "credentials.json"
     )
@@ -44,6 +44,19 @@ class Config:
     GMAIL_PERSONAL_TOKEN_PATH: str = os.getenv("GMAIL_PERSONAL_TOKEN_PATH", "token_personal.json")
     GMAIL_COLLEGE_TOKEN_PATH: str = os.getenv("GMAIL_COLLEGE_TOKEN_PATH", "token_college.json")
     GMAIL_MAX_EMAILS: int = int(os.getenv("GMAIL_MAX_EMAILS", "10"))
+
+    # SMTP Configuration (zero-OAuth quick setup for cold emailing)
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "")
+    EMAIL_DISPATCH_METHOD: str = os.getenv("EMAIL_DISPATCH_METHOD", "smtp")
+
+    # ── Profile & Outreach Paths ──────────────────────────────
+    RESUME_PATH: str = os.path.expanduser(os.getenv("RESUME_PATH", "~/.jarvis/resume.pdf"))
+    USER_PROFILE_PATH: str = os.path.expanduser(os.getenv("USER_PROFILE_PATH", "~/.jarvis/user_profile.json"))
+    COLD_APPLICATIONS_PATH: str = os.path.expanduser(os.getenv("COLD_APPLICATIONS_PATH", "~/.jarvis/cold_applications.json"))
 
     # ── Browser ───────────────────────────────────────────────
     # Custom Preferences
