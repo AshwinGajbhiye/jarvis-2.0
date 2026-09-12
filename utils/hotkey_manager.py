@@ -17,6 +17,8 @@ class HotkeyManager(QObject):
     """
     hotkey_triggered = pyqtSignal()
     meeting_hotkey_triggered = pyqtSignal()
+    stealth_toggle_triggered = pyqtSignal()
+    stealth_answer_triggered = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,6 +37,8 @@ class HotkeyManager(QObject):
             # Supported hotkeys:
             # - Launcher: Option+Space (⌥Space), Cmd+Shift+J (⌘⇧J), Cmd+Option+J (⌘⌥J)
             # - Meeting Auto-Notes: Option+R (⌥R), Cmd+Shift+M (⌘⇧M)
+            # - Stealth Copilot (Invisible to Screen Share): Option+S (⌥S), Cmd+Shift+S (⌘⇧S)
+            # - Instant Question Answering: Option+A (⌥A), Cmd+Shift+A (⌘⇧A)
             hotkeys = {
                 '<alt>+<space>': self._on_hotkey_activated,
                 '<cmd>+<shift>+j': self._on_hotkey_activated,
@@ -42,6 +46,10 @@ class HotkeyManager(QObject):
                 '<cmd>+<alt>+j': self._on_hotkey_activated,
                 '<alt>+r': self._on_meeting_hotkey_activated,
                 '<cmd>+<shift>+m': self._on_meeting_hotkey_activated,
+                '<alt>+s': self._on_stealth_toggle_activated,
+                '<cmd>+<shift>+s': self._on_stealth_toggle_activated,
+                '<alt>+a': self._on_stealth_answer_activated,
+                '<cmd>+<shift>+a': self._on_stealth_answer_activated,
             }
 
             self._listener = keyboard.GlobalHotKeys(hotkeys)
@@ -50,7 +58,9 @@ class HotkeyManager(QObject):
             self._running = True
             print("  ⌨️  Global hotkeys registered:")
             print("      • ⌥Space or ⌘⇧J: Quick Launcher")
-            print("      • ⌥R or ⌘⇧M: Toggle Meeting / Class Auto-Notes")
+            print("      • ⌥R or ⌘⇧M: Toggle Meeting Auto-Notes")
+            print("      • ⌥S or ⌘⇧S: Toggle Stealth Copilot (Screen-Invisible)")
+            print("      • ⌥A or ⌘⇧A: Quick Answer Teacher's Question")
 
         except Exception as e:
             self._has_accessibility = False
@@ -65,6 +75,14 @@ class HotkeyManager(QObject):
     def _on_meeting_hotkey_activated(self):
         """Called by pynput on its listener thread when the meeting hotkey is pressed."""
         self.meeting_hotkey_triggered.emit()
+
+    def _on_stealth_toggle_activated(self):
+        """Called when the stealth HUD toggle hotkey (⌥S) is pressed."""
+        self.stealth_toggle_triggered.emit()
+
+    def _on_stealth_answer_activated(self):
+        """Called when the stealth answer hotkey (⌥A) is pressed."""
+        self.stealth_answer_triggered.emit()
 
     def stop(self):
         """Stop listening for global hotkeys."""

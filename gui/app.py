@@ -12,10 +12,12 @@ from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QTextCursor, QPixmap, QP
 
 from gui.floating_reactor import FloatingReactorWindow
 from gui.floating_launcher import FloatingLauncherWindow
+from gui.stealth_hud import StealthHUDWindow
 from utils.hotkey_manager import HotkeyManager
 from utils.autostart import is_autostart_enabled, toggle_autostart, enable_autostart, disable_autostart
 from skills.meeting_recorder import get_meeting_recorder
 from skills.meeting_analyzer import analyze_meeting_audio
+from skills.stealth_copilot import StealthQuestionWorker
 
 from config import Config
 from brain import Brain
@@ -436,6 +438,15 @@ class JarvisApp(QMainWindow):
         self._setup_tray_icon()
         self._setup_hotkeys()
 
+        # Stealth Teleprompter HUD (Screen-Share Invisible)
+        self.stealth_hud = StealthHUDWindow()
+        self.stealth_worker = StealthQuestionWorker(self)
+        self.stealth_worker.listening_started.connect(self._on_stealth_listening_started)
+        self.stealth_worker.question_transcribed.connect(self._on_stealth_question_transcribed)
+        self.stealth_worker.answer_ready.connect(self.stealth_hud.display_answer)
+        self.stealth_worker.error_occurred.connect(self._on_stealth_error)
+        self.stealth_hud.answer_requested.connect(self._trigger_stealth_answer)
+
         # Meeting Recording Timer for live tray status
         self.meeting_timer = QTimer(self)
         self.meeting_timer.timeout.connect(self._update_meeting_tray_timer)
@@ -448,10 +459,12 @@ class JarvisApp(QMainWindow):
             print(f"⚠️ Failed to start Mobile API server: {e}")
 
     def _setup_hotkeys(self):
-        """Initialize global system-wide hotkeys (Option+Space & Option+R)."""
+        """Initialize global system-wide hotkeys (Option+Space, Option+R, Option+S, Option+A)."""
         self.hotkey_mgr = HotkeyManager(self)
         self.hotkey_mgr.hotkey_triggered.connect(self.signals.toggle_launcher.emit)
         self.hotkey_mgr.meeting_hotkey_triggered.connect(self._toggle_meeting_recording_from_tray)
+        self.hotkey_mgr.stealth_toggle_triggered.connect(self._toggle_stealth_hud)
+        self.hotkey_mgr.stealth_answer_triggered.connect(self._trigger_stealth_answer)
         self.hotkey_mgr.start()
 
     def _handle_launcher_submission(self, query: str, silent: bool = True):
@@ -533,6 +546,15 @@ class JarvisApp(QMainWindow):
         self.meeting_action = QAction("🎙️ Start Meeting / Class Auto-Notes (⌥R)", self)
         self.meeting_action.triggered.connect(self._toggle_meeting_recording_from_tray)
         self.tray_menu.addAction(self.meeting_action)
+
+        # Stealth Teleprompter Copilot (Screen-Share Invisible)
+        self.stealth_action = QAction("🕵️ Stealth Copilot (Screen-Invisible) [⌥S]", self)
+        self.stealth_action.triggered.connect(self._toggle_stealth_hud)
+        self.tray_menu.addAction(self.stealth_action)
+
+        self.stealth_answer_action = QAction("⚡ Quick Answer Teacher's Question [⌥A]", self)
+        self.stealth_answer_action.triggered.connect(self._trigger_stealth_answer)
+        self.tray_menu.addAction(self.stealth_answer_action)
         
         self.tray_menu.addSeparator()
         
@@ -738,6 +760,47 @@ class JarvisApp(QMainWindow):
         self.meeting_action.setEnabled(True)
         self.tray_icon.setIcon(QIcon(self._create_tray_pixmap(recording=False)))
         self.tray_icon.setToolTip("J.A.R.V.I.S. Personal AI Assistant")
+
+    def _toggle_stealth_hud(self):
+        """Toggle the screen-share-invisible teleprompter HUD."""
+        self.stealth_hud.toggle_hud()
+
+    def _trigger_stealth_answer(self):
+        """Trigger question listening and immediate answering for the Stealth HUD."""
+        if not self.stealth_hud.isVisible():
+            self.stealth_hud.show()
+            self.stealth_hud.raise_()
+        self.stealth_hud.set_listening_state(True)
+        if not self.stealth_worker.isRunning():
+            self.stealth_worker.start()
+
+    def _on_stealth_listening_started(self, text: str):
+        self.stealth_hud.set_listening_state(True, text)
+
+    def _on_stealth_question_transcribed(self, q: str):
+        self.stealth_hud.question_box.setText(f"Q: {q}")
+        self.stealth_hud.question_box.setStyleSheet("""
+            color: #00FFFF;
+            font-size: 12px;
+            font-weight: bold;
+            background: rgba(0, 255, 255, 0.08);
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            border-radius: 6px;
+            padding: 6px 10px;
+        """)
+
+    def _on_stealth_error(self, err: str):
+        self.stealth_hud.set_listening_state(False)
+        self.stealth_hud.question_box.setText(f"⚠️ {err}")
+        self.stealth_hud.question_box.setStyleSheet("""
+            color: #FF2D55;
+            font-size: 12px;
+            font-weight: bold;
+            background: rgba(255, 45, 85, 0.08);
+            border: 1px solid rgba(255, 45, 85, 0.3);
+            border-radius: 6px;
+            padding: 6px 10px;
+        """)
 
     def _force_show_chat(self):
         """Force the chat window to open so the user can interact manually."""
