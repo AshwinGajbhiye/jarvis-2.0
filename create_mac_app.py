@@ -18,7 +18,8 @@ LOG_PATH = os.path.join(LOG_DIR, "app.log")
 
 TARGETS = [
     os.path.expanduser("~/Applications/Jarvis.app"),
-    os.path.expanduser("~/Desktop/Jarvis.app")
+    os.path.expanduser("~/Desktop/Jarvis.app"),
+    "/Applications/Jarvis.app"
 ]
 
 # Ensure required directories exist
@@ -81,19 +82,24 @@ if os.path.exists(icon_png):
     except Exception as e:
         print(f"  ⚠️ Icon generation warning: {e}")
 
-# 5. Copy to Desktop
-desktop_app = TARGETS[1]
-shutil.copytree(primary_app, desktop_app)
+# 5. Deploy to remaining targets (Desktop and /Applications)
+for target in TARGETS[1:]:
+    try:
+        shutil.copytree(primary_app, target)
+        print(f"✅ Deployed to: {target}")
+    except Exception as e:
+        print(f"⚠️ Could not deploy to {target}: {e}")
 
 # 6. Re-register with LaunchServices so Spotlight immediately indexes it
 lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if os.path.exists(lsregister):
     for target in TARGETS:
-        subprocess.run([lsregister, "-f", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(target):
+            subprocess.run([lsregister, "-f", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # 7. Touch bundles to refresh Finder & Spotlight timestamps
 for target in TARGETS:
-    subprocess.run(["touch", target])
+    if os.path.exists(target):
+        subprocess.run(["touch", target])
 
 print(f"✅ Successfully compiled & signed native app at {primary_app}")
-print(f"✅ Successfully created Desktop launcher at {desktop_app}")
