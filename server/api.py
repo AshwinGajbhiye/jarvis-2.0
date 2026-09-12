@@ -493,6 +493,21 @@ def api_cancel_cold_email():
 def api_cold_email_history(status: str = Query("all")):
     return {"summary": list_cold_applications(status_filter=status), "analytics": get_outreach_analytics()}
 
+# ── Stealth Copilot Endpoints ─────────────────────────────────
+@app.post("/api/stealth/toggle", dependencies=[Depends(verify_api_key)])
+def api_stealth_toggle():
+    signals = getattr(app.state, "signals", None)
+    if signals and hasattr(signals, "toggle_stealth"):
+        signals.toggle_stealth.emit()
+        return {"status": "ok", "message": "Stealth HUD toggled successfully"}
+    return {"status": "error", "message": "GUI signals unavailable"}
+
+@app.post("/api/stealth/ask", dependencies=[Depends(verify_api_key)])
+def api_stealth_ask(question: str = Query(...)):
+    from skills.stealth_copilot import answer_question_superfast
+    res = answer_question_superfast(question)
+    return {"status": "ok", "result": res}
+
 # ── Server Launch Helper ──────────────────────────────────────
 def get_local_ip() -> str:
     """Discover Mac's local network IP."""

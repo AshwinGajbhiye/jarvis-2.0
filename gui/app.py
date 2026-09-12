@@ -40,12 +40,15 @@ class WorkerSignals(QObject):
     hide_reactor = pyqtSignal()
     launcher_response = pyqtSignal(str)      # send response to floating launcher
     toggle_launcher = pyqtSignal()           # hotkey trigger to toggle launcher
+    toggle_stealth = pyqtSignal()            # trigger stealth HUD
+    trigger_stealth_answer = pyqtSignal()    # trigger stealth answer
 
 # ── Worker Thread for Jarvis Logic ────────────────────────────
 class JarvisWorker(QThread):
     def __init__(self, brain, signals):
         super().__init__()
         self.brain = brain
+        self.brain.signals = signals
         self.signals = signals
         self.mic_available = is_mic_available()
         self.brain_ok = False
@@ -443,9 +446,12 @@ class JarvisApp(QMainWindow):
         self.stealth_worker = StealthQuestionWorker(self)
         self.stealth_worker.listening_started.connect(self._on_stealth_listening_started)
         self.stealth_worker.question_transcribed.connect(self._on_stealth_question_transcribed)
-        self.stealth_worker.answer_ready.connect(self.stealth_hud.display_answer)
+        self.stealth_worker.answer_ready.connect(self._on_stealth_answer_ready)
         self.stealth_worker.error_occurred.connect(self._on_stealth_error)
         self.stealth_hud.answer_requested.connect(self._trigger_stealth_answer)
+        self.stealth_hud.text_question_submitted.connect(self._handle_stealth_text_question)
+        self.signals.toggle_stealth.connect(self._toggle_stealth_hud)
+        self.signals.trigger_stealth_answer.connect(self._trigger_stealth_answer)
 
         # Meeting Recording Timer for live tray status
         self.meeting_timer = QTimer(self)
@@ -764,15 +770,31 @@ class JarvisApp(QMainWindow):
     def _toggle_stealth_hud(self):
         """Toggle the screen-share-invisible teleprompter HUD."""
         self.stealth_hud.toggle_hud()
+        if hasattr(self, "stealth_action"):
+            if self.stealth_hud.isVisible():
+                self.stealth_action.setText("🟢 Hide Stealth Copilot [⌥S]")
+            else:
+                self.stealth_action.setText("🕵️ Stealth Copilot (Screen-Invisible) [⌥S]")
 
     def _trigger_stealth_answer(self):
         """Trigger question listening and immediate answering for the Stealth HUD."""
         if not self.stealth_hud.isVisible():
-            self.stealth_hud.show()
-            self.stealth_hud.raise_()
+            self._toggle_stealth_hud()
+
+        # Temporarily pause wakeword detector so microphone is exclusively available
+        if hasattr(self, "worker") and hasattr(self.worker, "wakeword") and self.worker.wakeword:
+            self.worker.wakeword.pause()
+
         self.stealth_hud.set_listening_state(True)
         if not self.stealth_worker.isRunning():
             self.stealth_worker.start()
+
+    def _handle_stealth_text_question(self, question: str):
+        """Directly synthesize answer for user-typed question in Stealth HUD."""
+        if not question.strip():
+            return
+        self.stealth_hud.set_listening_state(True, f"Synthesizing answer for: {question}...")
+        self.stealth_worker.ask_text_question(question)
 
     def _on_stealth_listening_started(self, text: str):
         self.stealth_hud.set_listening_state(True, text)
@@ -789,6 +811,12 @@ class JarvisApp(QMainWindow):
             padding: 6px 10px;
         """)
 
+    def _on_stealth_answer_ready(self, question: str, direct_answer: str, key_points: list):
+        self.stealth_hud.display_answer(question, direct_answer, key_points)
+        # Safely resume wakeword detector
+        if hasattr(self, "worker") and hasattr(self.worker, "wakeword") and self.worker.wakeword:
+            self.worker.wakeword.resume()
+
     def _on_stealth_error(self, err: str):
         self.stealth_hud.set_listening_state(False)
         self.stealth_hud.question_box.setText(f"⚠️ {err}")
@@ -801,6 +829,9 @@ class JarvisApp(QMainWindow):
             border-radius: 6px;
             padding: 6px 10px;
         """)
+        # Safely resume wakeword detector
+        if hasattr(self, "worker") and hasattr(self.worker, "wakeword") and self.worker.wakeword:
+            self.worker.wakeword.resume()
 
     def _force_show_chat(self):
         """Force the chat window to open so the user can interact manually."""

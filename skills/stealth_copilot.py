@@ -220,18 +220,18 @@ class StealthQuestionWorker(QThread):
             try:
                 with sr.Microphone() as source:
                     recognizer.adjust_for_ambient_noise(source, duration=0.6)
-                    audio = recognizer.listen(source, timeout=4, phrase_time_limit=8)
+                    audio = recognizer.listen(source, timeout=8, phrase_time_limit=15)
                 
                 self.listening_started.emit("⚡ Transcribing teacher's question...")
                 question_text = recognizer.recognize_google(audio, language=Config.STT_LANGUAGE or "en-US")
             except sr.WaitTimeoutError:
-                self.error_occurred.emit("No voice detected within 4 seconds.")
+                self.error_occurred.emit("No voice detected. You can also type/paste your question in the box above.")
                 return
             except sr.UnknownValueError:
-                self.error_occurred.emit("Audio was unclear. Please press ⌥A to try again.")
+                self.error_occurred.emit("Audio was unclear. Please press ⌥A to retry or type in the box above.")
                 return
             except Exception as e:
-                self.error_occurred.emit(f"Microphone capture error: {e}")
+                self.error_occurred.emit(f"Microphone notice ({e}). Type question in the box above.")
                 return
 
         if not question_text:

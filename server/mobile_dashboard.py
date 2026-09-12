@@ -697,6 +697,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             <!-- Quick Suggestions -->
             <div class="chips-scroll">
+                <div class="chip" style="border-color: #00FF88; color: #00FF88;" onclick="toggleStealthFromMobile()">🕵️ Stealth Copilot</div>
                 <div class="chip" onclick="sendQuickCommand('Send me notes.txt')">📄 Get notes.txt</div>
                 <div class="chip" onclick="sendQuickCommand('What time is it?')">⏰ Time</div>
                 <div class="chip" onclick="sendQuickCommand('What is my battery level?')">🔋 Battery</div>
@@ -819,6 +820,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     <span class="card-title">🎛️ QUICK MAC ACTIONS</span>
                 </div>
                 <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                    <button class="key-btn" style="padding:10px 14px; border-color: #00FF88; color: #00FF88;" onclick="toggleStealthFromMobile()">🕵️ Stealth HUD</button>
                     <button class="key-btn" style="padding:10px 14px;" onclick="sendQuickCommand('Set volume to 50%')">🔊 Vol 50%</button>
                     <button class="key-btn" style="padding:10px 14px;" onclick="sendQuickCommand('Mute the Mac')">🔇 Mute</button>
                     <button class="key-btn" style="padding:10px 14px;" onclick="sendQuickCommand('Open Google Chrome')">🌐 Chrome</button>
@@ -1066,6 +1068,23 @@ HTML_CONTENT = """<!DOCTYPE html>
         function sendQuickCommand(cmd) {
             document.getElementById('chat-input').value = cmd;
             sendTextCommand();
+        }
+
+        async function toggleStealthFromMobile() {
+            try {
+                const res = await fetch('/api/stealth/toggle', {
+                    method: 'POST',
+                    headers: { 'x-api-key': API_KEY }
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    showToast("🕵️ Stealth Copilot HUD toggled on Mac!");
+                } else {
+                    showToast("⚠️ " + (data.message || "Failed to toggle"));
+                }
+            } catch (err) {
+                showToast("⚠️ Error toggling stealth: " + err.message);
+            }
         }
 
         // Voice Recording via MediaRecorder

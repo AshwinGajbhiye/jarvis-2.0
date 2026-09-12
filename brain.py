@@ -350,9 +350,17 @@ class Brain:
             Jarvis's response text
         """
         try:
-            # FAST PATH: Intercept file requests to bypass Gemini latency
             text_lower = user_input.lower().strip()
+
+            # FAST PATH: Intercept Stealth Copilot commands
             import re
+            if re.search(r"\b(stealth|stealth mode|copilot|teleprompter|invisible hud)\b", text_lower):
+                signals = getattr(self, "signals", None)
+                if signals and hasattr(signals, "toggle_stealth"):
+                    signals.toggle_stealth.emit()
+                return "Stealth Copilot HUD activated, Sir. It is hovering below your webcam and is 100% invisible to all screen sharing in Google Meet and Zoom. Press ⌥S to toggle it, ⌥A to capture a question, or type questions directly into the HUD."
+
+            # FAST PATH: Intercept file requests to bypass Gemini latency
             if any(k in text_lower for k in ["file", "send me", "transfer"]) and "whatsapp" not in text_lower:
                 # Check for explicit filename with extension or file keyword
                 fn = None
@@ -675,6 +683,14 @@ class Brain:
         Returns a response string if a match is found, otherwise None.
         """
         text = user_input.lower().strip()
+
+        # Stealth Copilot parsing
+        import re
+        if re.search(r"\b(stealth|stealth mode|copilot|teleprompter|invisible hud)\b", text):
+            signals = getattr(self, "signals", None)
+            if signals and hasattr(signals, "toggle_stealth"):
+                signals.toggle_stealth.emit()
+            return "Stealth Copilot HUD activated, Sir. It is hovering below your webcam and is 100% invisible to all screen sharing in Google Meet and Zoom. Press ⌥S to toggle it, ⌥A to capture a question, or type questions directly into the HUD."
         
         # Email parsing
         if "email" in text or "mail" in text:

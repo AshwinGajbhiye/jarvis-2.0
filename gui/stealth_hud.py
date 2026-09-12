@@ -16,7 +16,7 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QPushButton, QFrame, QGraphicsDropShadowEffect, QSizePolicy,
-    QApplication
+    QApplication, QLineEdit
 )
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QColor, QPalette, QCursor, QPainter, QBrush, QPen
@@ -28,6 +28,7 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
     """
     Apply macOS NSWindowSharingNone (sharingType = 0) to make the window
     completely invisible to screen capture, screen sharing, and recording.
+    Also ensures visibility across all Spaces and fullscreen apps.
     """
     if sys.platform != "darwin":
         return False
@@ -36,13 +37,30 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
         import objc
         from AppKit import NSApp
 
-        # Convert Qt winId (NSView pointer) to Objective-C NSView and get its NSWindow
-        view_ptr = int(qt_widget.winId())
-        ns_view = objc.objc_object(c_void_p=view_ptr)
-        ns_window = ns_view.window()
+        qt_widget.setWindowTitle("JarvisStealthHUD")
+
+        ns_window = None
+
+        # 1. Direct retrieval via Qt winId
+        try:
+            view_ptr = int(qt_widget.winId())
+            ns_view = objc.objc_object(c_void_p=view_ptr)
+            ns_window = ns_view.window()
+        except Exception:
+            pass
+
+        # 2. Fallback search through NSApp windows
+        if not ns_window and NSApp:
+            for win in NSApp.windows():
+                if win.title() == "JarvisStealthHUD" or (
+                    abs(win.frame().size.width - qt_widget.width()) < 10
+                    and abs(win.frame().size.height - qt_widget.height()) < 10
+                ):
+                    ns_window = win
+                    break
 
         if not ns_window:
-            print("  ⚠️ Could not retrieve NSWindow from NSView pointer.")
+            print("  ⚠️ Could not retrieve NSWindow for Stealth HUD.")
             return False
 
         # NSWindowSharingNone = 0 (Window is omitted from screen capture / screen sharing)
@@ -57,8 +75,9 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
         # NSStatusWindowLevel = 25 (Floats above fullscreen apps & video call overlays)
         ns_window.setLevel_(25)
         ns_window.setHidesOnDeactivate_(False)
+        ns_window.orderFrontRegardless()
 
-        print(f"  🛡️ Stealth mode enabled: NSWindowSharingNone (sharingType={ns_window.sharingType()})")
+        print(f"  🛡️ Stealth mode active: NSWindowSharingNone (sharingType={ns_window.sharingType()}) on all Spaces")
         return True
 
     except Exception as e:
@@ -72,13 +91,15 @@ class StealthHUDWindow(QWidget):
     of all windows (positioned just beneath the user's webcam).
     """
 
-    answer_requested = pyqtSignal()  # Signal to trigger question listening & answering
+    answer_requested = pyqtSignal()          # Signal to trigger microphone listening & answering
+    text_question_submitted = pyqtSignal(str) # Signal to trigger answering for typed question
 
     def __init__(self, parent=None):
         super().__init__(parent)
         
         self.drag_position = QPoint()
         self._is_stealth_configured = False
+        self.setWindowTitle("JarvisStealthHUD")
 
         # Frameless + Always on top + Transparent background
         self.setWindowFlags(
@@ -86,11 +107,9 @@ class StealthHUDWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
 
-        self.setMinimumSize(480, 260)
-        self.resize(520, 290)
+        self.setMinimumSize(480, 290)
+        self.resize(520, 310)
 
         self._build_ui()
         self._position_below_webcam()
@@ -104,8 +123,8 @@ class StealthHUDWindow(QWidget):
         self.card = QFrame(self)
         self.card.setStyleSheet("""
             QFrame {
-                background-color: rgba(10, 15, 23, 0.94);
-                border: 1px solid rgba(0, 255, 255, 0.35);
+                background-color: rgba(10, 15, 23, 0.96);
+                border: 1px solid rgba(0, 255, 255, 0.4);
                 border-radius: 12px;
             }
         """)
@@ -141,7 +160,7 @@ class StealthHUDWindow(QWidget):
                 color: #0A0F14;
                 font-weight: bold;
                 font-size: 11px;
-                padding: 3px 10px;
+                padding: 4px 10px;
                 border-radius: 4px;
                 border: none;
             }
@@ -175,6 +194,27 @@ class StealthHUDWindow(QWidget):
         top_bar.addWidget(self.hide_btn)
 
         card_layout.addLayout(top_bar)
+
+        # ── Silent Text Question Input ────────────────────────────
+        self.question_input = QLineEdit(self)
+        self.question_input.setPlaceholderText("💬 Type/paste question & press Enter, or click ⚡ Answer...")
+        self.question_input.setStyleSheet("""
+            QLineEdit {
+                background-color: rgba(255, 255, 255, 0.05);
+                color: #00FFFF;
+                font-size: 12px;
+                font-family: 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
+                border: 1px solid rgba(0, 255, 255, 0.25);
+                border-radius: 6px;
+                padding: 5px 8px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #00FFFF;
+                background-color: rgba(0, 255, 255, 0.08);
+            }
+        """)
+        self.question_input.returnPressed.connect(self._on_text_submitted)
+        card_layout.addWidget(self.question_input)
 
         # ── Question Section ──────────────────────────────────────
         self.question_box = QLabel("Waiting for teacher's question... (Press ⌥A or click Answer)", self)
@@ -250,20 +290,26 @@ class StealthHUDWindow(QWidget):
 
         root_layout.addWidget(self.card)
 
+    def _on_text_submitted(self):
+        """Handle user typing a question directly into the stealth HUD."""
+        query = self.question_input.text().strip()
+        if query:
+            self.text_question_submitted.emit(query)
+            self.question_input.clear()
+
     def _position_below_webcam(self):
-        """Position the HUD centered at the top of the primary screen just beneath the webcam."""
-        screen = QApplication.primaryScreen()
+        """Position the HUD centered at the top of the active screen just beneath the webcam."""
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if screen:
             geom = screen.geometry()
-            x = (geom.width() - self.width()) // 2
-            y = 45  # Right below the top menu bar / webcam
+            x = geom.x() + (geom.width() - self.width()) // 2
+            y = geom.y() + 45  # Right below the top menu bar / webcam
             self.move(x, y)
 
     def showEvent(self, event):
-        """When the window is shown, ensure macOS NSWindowSharingNone is applied."""
+        """When the window is shown, ensure macOS NSWindowSharingNone is applied immediately."""
         super().showEvent(event)
-        if not self._is_stealth_configured:
-            QTimer.singleShot(50, self._apply_stealth)
+        self._apply_stealth()
 
     def _apply_stealth(self):
         """Apply stealth screen-share exclusion."""
@@ -280,9 +326,12 @@ class StealthHUDWindow(QWidget):
         if self.isVisible():
             self.hide()
         else:
+            self._position_below_webcam()
             self.show()
             self.raise_()
             self.activateWindow()
+            self._apply_stealth()
+            self.question_input.setFocus()
 
     def set_listening_state(self, is_listening: bool = True, text: str = ""):
         """Update display when listening for teacher's voice."""
