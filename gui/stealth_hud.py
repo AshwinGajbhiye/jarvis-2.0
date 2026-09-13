@@ -37,8 +37,11 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
     """
     Apply macOS NSWindowSharingNone (sharingType = 0) to make the window
     completely invisible to screen capture, screen sharing, and recording.
-    Also ensures visibility across all Spaces and fullscreen apps without
-    stealing focus from the user's active solving window.
+    Also ensures visibility across all Spaces AND fullscreen apps by using
+    NSScreenSaverWindowLevel (1000) + NSPanel floating behavior.
+
+    This replicates how macOS system overlays (Spotlight, Control Center)
+    remain visible above fullscreen apps without stealing focus.
     """
     if sys.platform != "darwin":
         return False
@@ -76,17 +79,40 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
         # NSWindowSharingNone = 0 (Window is omitted from screen capture / screen sharing)
         ns_window.setSharingType_(0)
 
-        # Collection Behavior for multi-desktop (Spaces) & fullscreen auxiliary:
-        # CAN_JOIN_ALL_SPACES (1 << 0) + FULL_SCREEN_AUXILIARY (1 << 8) + IGNORES_CYCLE (1 << 6)
-        # Note: Stationary (1 << 4) is intentionally omitted to avoid macOS Sonoma/Sequoia spaces conflicts.
+        # Collection Behavior for multi-desktop (Spaces) & fullscreen apps:
+        #   CAN_JOIN_ALL_SPACES  (1 << 0)  = appear on every desktop/Space
+        #   TRANSIENT            (1 << 3)  = don't create own Space, don't interfere w/ Mission Control
+        #   STATIONARY           (1 << 4)  = stay in place during Space-switch animations
+        #   IGNORES_CYCLE        (1 << 6)  = skip Cmd+` app window cycling
+        #   FULL_SCREEN_AUXILIARY(1 << 8)  = appear OVER fullscreen apps as auxiliary panel
         CAN_JOIN_ALL_SPACES = 1 << 0
-        FULL_SCREEN_AUXILIARY = 1 << 8
+        TRANSIENT = 1 << 3
+        STATIONARY = 1 << 4
         IGNORES_CYCLE = 1 << 6
-        collection_behavior = CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY | IGNORES_CYCLE
+        FULL_SCREEN_AUXILIARY = 1 << 8
+        collection_behavior = (
+            CAN_JOIN_ALL_SPACES
+            | TRANSIENT
+            | STATIONARY
+            | IGNORES_CYCLE
+            | FULL_SCREEN_AUXILIARY
+        )
         ns_window.setCollectionBehavior_(collection_behavior)
 
-        # NSStatusWindowLevel = 25 (Floats above fullscreen apps & video call overlays)
-        ns_window.setLevel_(25)
+        # NSScreenSaverWindowLevel = 1000
+        # This is ABOVE the fullscreen shielding threshold (~level 103 for panels, 25 for status).
+        # Fullscreen apps run in their own Space with a shield at ~level 25-103.
+        # Level 1000 guarantees the HUD floats above ALL fullscreen apps,
+        # Dock, menu bar, and video call overlays.
+        NS_SCREEN_SAVER_WINDOW_LEVEL = 1000
+        ns_window.setLevel_(NS_SCREEN_SAVER_WINDOW_LEVEL)
+
+        # Convert to floating panel behavior — tells macOS to treat this window
+        # like a floating utility panel that persists across Space transitions.
+        # Without this, macOS can demote the window during fullscreen Space switches.
+        if ns_window.respondsToSelector_(b"setFloatingPanel:"):
+            ns_window.setFloatingPanel_(True)
+
         ns_window.setHidesOnDeactivate_(False)
 
         # becomesKeyOnlyIfNeeded = True ensures clicks on buttons/surfaces do NOT steal Key focus from user's coding window
@@ -99,7 +125,8 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
 
         ns_window.orderFrontRegardless()
 
-        print(f"  🛡️ Stealth mode active: NSWindowSharingNone (sharingType={ns_window.sharingType()}) on all Spaces (Non-Activating)")
+        print(f"  🛡️ Stealth mode active: sharingType={ns_window.sharingType()}, level={ns_window.level()}, "
+              f"floatingPanel=True, fullscreen-capable ✅")
         return True
 
     except Exception as e:
@@ -138,6 +165,12 @@ class StealthHUDWindow(QWidget):
         self._stream_index = 0
         self._stream_timer = QTimer(self)
         self._stream_timer.timeout.connect(self._stream_next_word)
+
+        # Periodic re-assertion timer: macOS can demote window levels during
+        # fullscreen Space transitions. This timer re-applies the level every 2s
+        # while the HUD is visible, ensuring it stays above fullscreen apps.
+        self._reassert_timer = QTimer(self)
+        self._reassert_timer.timeout.connect(self._reassert_stealth_level)
 
         # Session Q&A history (local mirror)
         self._qa_history: List[Dict[str, str]] = []
@@ -642,12 +675,20 @@ class StealthHUDWindow(QWidget):
             self.move(x, y)
 
     def showEvent(self, event):
-        """When the window is shown, ensure macOS NSWindowSharingNone is applied immediately."""
+        """When the window is shown, apply stealth + start the re-assertion timer."""
         super().showEvent(event)
         self._apply_stealth()
+        # Start periodic re-assertion (every 2s) to counteract macOS Space demotions
+        if not self._reassert_timer.isActive():
+            self._reassert_timer.start(2000)
+
+    def hideEvent(self, event):
+        """When the window is hidden, stop the re-assertion timer to save CPU."""
+        super().hideEvent(event)
+        self._reassert_timer.stop()
 
     def _apply_stealth(self):
-        """Apply stealth screen-share exclusion."""
+        """Apply stealth screen-share exclusion + fullscreen overlay config."""
         ok = _apply_stealth_to_window(self)
         self._is_stealth_configured = ok
         if ok:
@@ -655,6 +696,51 @@ class StealthHUDWindow(QWidget):
             self.badge_label.setStyleSheet("color: #00FF88; font-size: 11px; font-weight: bold; border: none; background: transparent;")
         else:
             self.badge_label.setText("🟡 HUD ACTIVE")
+
+    def _reassert_stealth_level(self):
+        """Periodically re-apply NSScreenSaverWindowLevel (1000) and orderFrontRegardless.
+
+        macOS can demote window levels during fullscreen Space transitions.
+        This timer counteracts that by re-asserting the level every 2 seconds.
+        Only runs while the HUD is visible.
+        """
+        if not self.isVisible():
+            self._reassert_timer.stop()
+            return
+
+        if sys.platform != "darwin":
+            return
+
+        try:
+            import objc
+            from AppKit import NSApp
+
+            ns_window = None
+
+            # Direct retrieval via Qt winId
+            try:
+                view_ptr = int(self.winId())
+                ns_view = objc.objc_object(c_void_p=view_ptr)
+                ns_window = ns_view.window()
+            except Exception:
+                pass
+
+            # Fallback search
+            if not ns_window and NSApp:
+                for win in NSApp.windows():
+                    if win.title() == "JarvisStealthHUD":
+                        ns_window = win
+                        break
+
+            if ns_window:
+                current_level = ns_window.level()
+                NS_SCREEN_SAVER_WINDOW_LEVEL = 1000
+                if current_level < NS_SCREEN_SAVER_WINDOW_LEVEL:
+                    # macOS demoted our level — re-assert it
+                    ns_window.setLevel_(NS_SCREEN_SAVER_WINDOW_LEVEL)
+                ns_window.orderFrontRegardless()
+        except Exception:
+            pass
 
     def toggle_hud(self):
         """Toggle HUD visibility without stealing focus from the active workspace (Req 5)."""
