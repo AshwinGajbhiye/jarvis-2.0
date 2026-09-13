@@ -37,11 +37,13 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
     """
     Apply macOS NSWindowSharingNone (sharingType = 0) to make the window
     completely invisible to screen capture, screen sharing, and recording.
-    Also ensures visibility across all Spaces AND fullscreen apps by using
-    NSScreenSaverWindowLevel (1000) + NSPanel floating behavior.
 
-    This replicates how macOS system overlays (Spotlight, Control Center)
-    remain visible above fullscreen apps without stealing focus.
+    For fullscreen app visibility on macOS 26+:
+    - Window level alone does NOT work (even CGShieldingWindowLevel is blocked)
+    - Fullscreen apps create isolated Spaces that block ALL other windows
+    - The fix requires actively teleporting the window into the fullscreen Space
+      using the MoveToActiveSpace behavior toggle (done in _reassert_stealth_level)
+    - Initial setup uses CanJoinAllSpaces + FullScreenAuxiliary + max level
     """
     if sys.platform != "darwin":
         return False
@@ -81,52 +83,56 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
 
         # Collection Behavior for multi-desktop (Spaces) & fullscreen apps:
         #   CAN_JOIN_ALL_SPACES  (1 << 0)  = appear on every desktop/Space
-        #   TRANSIENT            (1 << 3)  = don't create own Space, don't interfere w/ Mission Control
         #   STATIONARY           (1 << 4)  = stay in place during Space-switch animations
         #   IGNORES_CYCLE        (1 << 6)  = skip Cmd+` app window cycling
-        #   FULL_SCREEN_AUXILIARY(1 << 8)  = appear OVER fullscreen apps as auxiliary panel
+        #   FULL_SCREEN_AUXILIARY(1 << 8)  = eligible to appear on fullscreen Spaces
         CAN_JOIN_ALL_SPACES = 1 << 0
-        TRANSIENT = 1 << 3
         STATIONARY = 1 << 4
         IGNORES_CYCLE = 1 << 6
         FULL_SCREEN_AUXILIARY = 1 << 8
         collection_behavior = (
             CAN_JOIN_ALL_SPACES
-            | TRANSIENT
             | STATIONARY
             | IGNORES_CYCLE
             | FULL_SCREEN_AUXILIARY
         )
         ns_window.setCollectionBehavior_(collection_behavior)
 
-        # NSScreenSaverWindowLevel = 1000
-        # This is ABOVE the fullscreen shielding threshold (~level 103 for panels, 25 for status).
-        # Fullscreen apps run in their own Space with a shield at ~level 25-103.
-        # Level 1000 guarantees the HUD floats above ALL fullscreen apps,
-        # Dock, menu bar, and video call overlays.
-        NS_SCREEN_SAVER_WINDOW_LEVEL = 1000
-        ns_window.setLevel_(NS_SCREEN_SAVER_WINDOW_LEVEL)
-
-        # Convert to floating panel behavior — tells macOS to treat this window
-        # like a floating utility panel that persists across Space transitions.
-        # Without this, macOS can demote the window during fullscreen Space switches.
-        if ns_window.respondsToSelector_(b"setFloatingPanel:"):
-            ns_window.setFloatingPanel_(True)
+        # Use CGShieldingWindowLevel - 1 (2147483627) — the highest possible level
+        # below the WindowServer itself. This is above everything except the
+        # compositor's own shielding windows.
+        try:
+            from Quartz import CGShieldingWindowLevel
+            target_level = CGShieldingWindowLevel() - 1
+        except ImportError:
+            target_level = 1000  # Fallback to NSScreenSaverWindowLevel
+        ns_window.setLevel_(target_level)
 
         ns_window.setHidesOnDeactivate_(False)
 
-        # becomesKeyOnlyIfNeeded = True ensures clicks on buttons/surfaces do NOT steal Key focus from user's coding window
-        if hasattr(ns_window, "setBecomesKeyOnlyIfNeeded_"):
-            ns_window.setBecomesKeyOnlyIfNeeded_(True)
-
-        # _setPreventsActivation: true SPI directly sets kCGSPreventsActivationTagBit in WindowServer
+        # Prevent activation stealing — keep focus on user's active window
         if ns_window.respondsToSelector_(b"_setPreventsActivation:"):
             ns_window._setPreventsActivation_(True)
 
+        # becomesKeyOnlyIfNeeded — clicks on HUD buttons don't steal focus
+        if hasattr(ns_window, "setBecomesKeyOnlyIfNeeded_"):
+            ns_window.setBecomesKeyOnlyIfNeeded_(True)
+
+        # No animation on space switch
+        if ns_window.respondsToSelector_(b"setAnimationBehavior:"):
+            ns_window.setAnimationBehavior_(0)
+
+        # setCanHide_(False) — prevent macOS from auto-hiding us
+        if ns_window.respondsToSelector_(b"setCanHide:"):
+            ns_window.setCanHide_(False)
+
         ns_window.orderFrontRegardless()
 
+        # Cache the NSWindow reference on the widget for fast access in reassert timer
+        qt_widget._cached_ns_window = ns_window
+
         print(f"  🛡️ Stealth mode active: sharingType={ns_window.sharingType()}, level={ns_window.level()}, "
-              f"floatingPanel=True, fullscreen-capable ✅")
+              f"class={ns_window.className()}, fullscreen-teleport ✅")
         return True
 
     except Exception as e:
@@ -680,7 +686,7 @@ class StealthHUDWindow(QWidget):
         self._apply_stealth()
         # Start periodic re-assertion (every 2s) to counteract macOS Space demotions
         if not self._reassert_timer.isActive():
-            self._reassert_timer.start(2000)
+            self._reassert_timer.start(1500)  # 1.5s for fast fullscreen Space teleport
 
     def hideEvent(self, event):
         """When the window is hidden, stop the re-assertion timer to save CPU."""
@@ -698,11 +704,18 @@ class StealthHUDWindow(QWidget):
             self.badge_label.setText("🟡 HUD ACTIVE")
 
     def _reassert_stealth_level(self):
-        """Periodically re-apply NSScreenSaverWindowLevel (1000) and orderFrontRegardless.
+        """Periodically teleport the HUD into the active macOS Space (including fullscreen).
 
-        macOS can demote window levels during fullscreen Space transitions.
-        This timer counteracts that by re-asserting the level every 2 seconds.
-        Only runs while the HUD is visible.
+        On macOS 26+, fullscreen apps create isolated Spaces. Window level alone
+        does NOT make a window visible on a fullscreen Space — even at
+        CGShieldingWindowLevel (2147483627), the window is NOT ON SCREEN.
+
+        The fix: when isOnActiveSpace() returns False, we toggle the collection
+        behavior to MoveToActiveSpace (1 << 1), call orderFrontRegardless() to
+        teleport the window into the active fullscreen Space, then switch back
+        to CanJoinAllSpaces + FullScreenAuxiliary for persistent visibility.
+
+        This runs every 1.5 seconds while the HUD is visible.
         """
         if not self.isVisible():
             self._reassert_timer.stop()
@@ -712,33 +725,62 @@ class StealthHUDWindow(QWidget):
             return
 
         try:
-            import objc
-            from AppKit import NSApp
+            # Use cached NSWindow reference for speed (set by _apply_stealth_to_window)
+            ns_window = getattr(self, "_cached_ns_window", None)
 
-            ns_window = None
+            if not ns_window:
+                import objc
+                try:
+                    view_ptr = int(self.winId())
+                    ns_view = objc.objc_object(c_void_p=view_ptr)
+                    ns_window = ns_view.window()
+                    self._cached_ns_window = ns_window
+                except Exception:
+                    pass
 
-            # Direct retrieval via Qt winId
-            try:
-                view_ptr = int(self.winId())
-                ns_view = objc.objc_object(c_void_p=view_ptr)
-                ns_window = ns_view.window()
-            except Exception:
-                pass
+            if not ns_window:
+                return
 
-            # Fallback search
-            if not ns_window and NSApp:
-                for win in NSApp.windows():
-                    if win.title() == "JarvisStealthHUD":
-                        ns_window = win
-                        break
+            # Check if we're on the active Space
+            on_active = False
+            if ns_window.respondsToSelector_(b"isOnActiveSpace"):
+                on_active = ns_window.isOnActiveSpace()
 
-            if ns_window:
-                current_level = ns_window.level()
-                NS_SCREEN_SAVER_WINDOW_LEVEL = 1000
-                if current_level < NS_SCREEN_SAVER_WINDOW_LEVEL:
-                    # macOS demoted our level — re-assert it
-                    ns_window.setLevel_(NS_SCREEN_SAVER_WINDOW_LEVEL)
+            if not on_active:
+                # ═══ TELEPORT: Move window into the active Space (including fullscreen) ═══
+                #
+                # MoveToActiveSpace (1 << 1) tells macOS to teleport the window
+                # to whichever Space the user is currently on — even if that's a
+                # fullscreen app's private Space.
+                MOVE_TO_ACTIVE_SPACE = 1 << 1
+                FULL_SCREEN_AUXILIARY = 1 << 8
+
+                # Step 1: Switch to MoveToActiveSpace + FullScreenAuxiliary
+                ns_window.setCollectionBehavior_(MOVE_TO_ACTIVE_SPACE | FULL_SCREEN_AUXILIARY)
                 ns_window.orderFrontRegardless()
+
+                # Step 2: Switch back to CanJoinAllSpaces for persistent multi-Space visibility
+                CAN_JOIN_ALL_SPACES = 1 << 0
+                STATIONARY = 1 << 4
+                IGNORES_CYCLE = 1 << 6
+                ns_window.setCollectionBehavior_(
+                    CAN_JOIN_ALL_SPACES | STATIONARY | IGNORES_CYCLE | FULL_SCREEN_AUXILIARY
+                )
+                ns_window.orderFrontRegardless()
+
+            # Re-assert window level (macOS can demote during Space transitions)
+            try:
+                from Quartz import CGShieldingWindowLevel
+                target_level = CGShieldingWindowLevel() - 1
+            except ImportError:
+                target_level = 1000
+            current_level = ns_window.level()
+            if current_level < target_level:
+                ns_window.setLevel_(target_level)
+
+            # Always force to front
+            ns_window.orderFrontRegardless()
+
         except Exception:
             pass
 
