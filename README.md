@@ -114,6 +114,55 @@ jarvis/
 
 ---
 
+## 🕵️ Google Meet Stealth Copilot
+
+A real-time, screen-share-invisible Q&A assistant for Google Meet calls. Jarvis listens to questions during your meeting, generates answers via Antigravity, and displays them in a private overlay that **only you can see** — completely invisible to screen sharing, screen recording, and screenshots.
+
+### How It Works
+
+1. **Press `⌥S`** to toggle the Stealth HUD (or say "stealth mode" to Jarvis)
+2. **Press `⌥A`** to listen for a question via microphone/system audio
+3. **Or type** your question directly in the HUD input box
+4. Jarvis generates an answer and displays it in the overlay with a streaming typing animation
+5. The answer is **invisible to everyone else** on the Google Meet call
+
+### Hotkey Cheat Sheet
+
+| Hotkey | Action |
+|--------|--------|
+| `⌥S` or `⌘⇧S` | Toggle Stealth HUD visibility |
+| `⌥A` or `⌘⇧A` | Listen for question & generate answer |
+| `Enter` | Submit typed question |
+| `Esc` | Hide HUD |
+
+### System Audio Capture (Optional — Hear Friend's Voice)
+
+By default, Jarvis listens through your physical microphone. To capture your friend's voice directly from Google Meet's audio output, install a virtual audio loopback driver:
+
+```bash
+# One-time setup (BlackHole — free, open-source)
+brew install blackhole-2ch
+```
+
+Then create a **Multi-Output Device** in macOS:
+1. Open **Audio MIDI Setup** (Spotlight → "Audio MIDI Setup")
+2. Click **"+"** at the bottom → **Create Multi-Output Device**
+3. Check both **"BlackHole 2ch"** and your speakers/headphones
+4. Set the Multi-Output Device as your system sound output in System Settings
+
+Jarvis will automatically detect BlackHole and switch to system audio capture. The HUD shows `🔊 System Audio (BlackHole)` when active, or `🎤 Physical Mic Only` when using the default microphone.
+
+### Answer Pipeline
+
+Jarvis uses a cascading answer pipeline for maximum speed and reliability:
+
+1. **Local Knowledge Base** (instant, <50ms) — Flash answer for common CS topics
+2. **Antigravity CLI** (`antigravity prompt`) — Primary engine for full answers
+3. **Antigravity Python SDK** — Fallback if CLI is not installed
+4. **Deterministic Synthesis** — Last-resort generic answer
+
+---
+
 ## 📄 License
 
 MIT License — Feel free to modify and make it your own!

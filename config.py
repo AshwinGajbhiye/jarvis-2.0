@@ -18,7 +18,7 @@ class Config:
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "openrouter/free")
     USE_ANTIGRAVITY: bool = os.getenv("USE_ANTIGRAVITY", "true").lower() in ("true", "1", "yes")
-    ANTIGRAVITY_MODEL: str = os.getenv("ANTIGRAVITY_MODEL", "gemini-2.5-flash")
+    ANTIGRAVITY_MODEL: str = os.getenv("ANTIGRAVITY_MODEL", "gemini-3.5-flash-lite")
     BROWSER_CDP_PORT: int = int(os.getenv("BROWSER_CDP_PORT", "9222"))
     AUTO_SKIP_YOUTUBE_ADS: bool = os.getenv("AUTO_SKIP_YOUTUBE_ADS", "true").lower() in ("true", "1", "yes")
 

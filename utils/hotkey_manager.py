@@ -19,6 +19,7 @@ class HotkeyManager(QObject):
     meeting_hotkey_triggered = pyqtSignal()
     stealth_toggle_triggered = pyqtSignal()
     stealth_answer_triggered = pyqtSignal()
+    stealth_snip_triggered = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,6 +40,7 @@ class HotkeyManager(QObject):
             # - Meeting Auto-Notes: Option+R (⌥R), Cmd+Shift+M (⌘⇧M)
             # - Stealth Copilot (Invisible to Screen Share): Option+S (⌥S), Cmd+Shift+S (⌘⇧S)
             # - Instant Question Answering: Option+A (⌥A), Cmd+Shift+A (⌘⇧A)
+            # - Screen Snippet Question Solver: Option+O (⌥O), Cmd+Shift+O (⌘⇧O)
             hotkeys = {
                 '<alt>+<space>': self._on_hotkey_activated,
                 '<cmd>+<shift>+j': self._on_hotkey_activated,
@@ -50,6 +52,8 @@ class HotkeyManager(QObject):
                 '<cmd>+<shift>+s': self._on_stealth_toggle_activated,
                 '<alt>+a': self._on_stealth_answer_activated,
                 '<cmd>+<shift>+a': self._on_stealth_answer_activated,
+                '<alt>+o': self._on_stealth_snip_activated,
+                '<cmd>+<shift>+o': self._on_stealth_snip_activated,
             }
 
             self._listener = keyboard.GlobalHotKeys(hotkeys)
@@ -60,7 +64,8 @@ class HotkeyManager(QObject):
             print("      • ⌥Space or ⌘⇧J: Quick Launcher")
             print("      • ⌥R or ⌘⇧M: Toggle Meeting Auto-Notes")
             print("      • ⌥S or ⌘⇧S: Toggle Stealth Copilot (Screen-Invisible)")
-            print("      • ⌥A or ⌘⇧A: Quick Answer Teacher's Question")
+            print("      • ⌥A or ⌘⇧A: Quick Answer Friend's Question")
+            print("      • ⌥O or ⌘⇧O: Screen Snippet Question Solver")
 
         except Exception as e:
             self._has_accessibility = False
@@ -83,6 +88,10 @@ class HotkeyManager(QObject):
     def _on_stealth_answer_activated(self):
         """Called when the stealth answer hotkey (⌥A) is pressed."""
         self.stealth_answer_triggered.emit()
+
+    def _on_stealth_snip_activated(self):
+        """Called when the screen snippet hotkey (⌥O) is pressed."""
+        self.stealth_snip_triggered.emit()
 
     def stop(self):
         """Stop listening for global hotkeys."""

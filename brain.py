@@ -203,6 +203,7 @@ class Brain:
         dynamic_prompt = JARVIS_SYSTEM_PROMPT + get_facts_for_prompt()
 
         # If user enabled Antigravity as primary AI backend
+        antigravity_primary = False
         if Config.USE_ANTIGRAVITY:
             try:
                 tool_callables = [tool["function"] for tool in self._all_tools]
@@ -214,8 +215,10 @@ class Brain:
                 )
                 if self.antigravity_backend.start():
                     print("  🚀 Jarvis running with Antigravity Agent backend!")
-                    self._initialized = True
-                    return True
+                    antigravity_primary = True
+                    # NOTE: Do NOT return early — continue to initialize Gemini
+                    # chat_session as fallback so _send_with_retry won't crash
+                    # if the Antigravity backend fails mid-session.
                 else:
                     print("  ⚠️ Antigravity backend start returned False, falling back to standard Gemini...")
             except Exception as e:
@@ -258,11 +261,47 @@ class Brain:
                     pass 
 
             self._initialized = True
+            if antigravity_primary:
+                print("  ✅ Gemini fallback chat_session initialized alongside Antigravity backend.")
             return True
 
         except Exception as e:
             print(f"  ❌ Failed to initialize AI: {e}")
             return False
+
+    def _lazy_init_chat_session(self):
+        """Lazily initialize Gemini chat_session if it was never set.
+        
+        Safety net: if Antigravity was the only backend and its chat() method failed,
+        we need a working chat_session for _send_with_retry() to fall back to.
+        """
+        dynamic_prompt = JARVIS_SYSTEM_PROMPT + get_facts_for_prompt()
+
+        pool = []
+        if Config.GEMINI_API_KEY: pool.append(Config.GEMINI_API_KEY)
+        if Config.GEMINI_API_KEY_FALLBACK: pool.append(Config.GEMINI_API_KEY_FALLBACK)
+
+        if not pool:
+            raise Exception("No Gemini API keys available for fallback chat_session initialization.")
+
+        selected_key = pool[0]
+        for key in pool:
+            if self.quota.get_remaining(key) > 0:
+                selected_key = key
+                break
+
+        self.active_api_key = selected_key
+        self.client = genai.Client(api_key=selected_key)
+        gemini_tools = self._build_gemini_tools()
+        config = types.GenerateContentConfig(
+            system_instruction=dynamic_prompt,
+            tools=gemini_tools,
+        )
+        self.chat_session = self.client.chats.create(
+            model=Config.GEMINI_MODEL,
+            config=config
+        )
+        print("  ⚡ Lazy-initialized Gemini chat_session as fallback.")
 
     def _send_with_retry(self, message, max_retries=2):
         """Send a message with infinite key pool swapping on Quota errors."""
@@ -449,6 +488,11 @@ class Brain:
 
         try:
             self._tool_calls_this_turn = 0  # Reset counter
+
+            # Guard: lazily initialize chat_session if it was never set
+            # (can happen if initialize() was called before Gemini keys were configured)
+            if self.chat_session is None:
+                self._lazy_init_chat_session()
 
             # Send message to Gemini with retry logic
             response = self._send_with_retry(user_input)

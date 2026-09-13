@@ -18,6 +18,7 @@ from utils.autostart import is_autostart_enabled, toggle_autostart, enable_autos
 from skills.meeting_recorder import get_meeting_recorder
 from skills.meeting_analyzer import analyze_meeting_audio
 from skills.stealth_copilot import StealthQuestionWorker
+from utils.screen_snipper import ScreenSnipperWorker
 
 from config import Config
 from brain import Brain
@@ -42,6 +43,7 @@ class WorkerSignals(QObject):
     toggle_launcher = pyqtSignal()           # hotkey trigger to toggle launcher
     toggle_stealth = pyqtSignal()            # trigger stealth HUD
     trigger_stealth_answer = pyqtSignal()    # trigger stealth answer
+    trigger_stealth_snip = pyqtSignal()      # trigger screen snippet OCR
 
 # ── Worker Thread for Jarvis Logic ────────────────────────────
 class JarvisWorker(QThread):
@@ -441,21 +443,37 @@ class JarvisApp(QMainWindow):
         self._setup_tray_icon()
         self._setup_hotkeys()
 
-        # Stealth Teleprompter HUD (Screen-Share Invisible)
+        # Stealth Teleprompter HUD (Screen-Share Invisible — Google Meet Copilot)
         self.stealth_hud = StealthHUDWindow()
         self.stealth_worker = StealthQuestionWorker(self)
         self.stealth_worker.listening_started.connect(self._on_stealth_listening_started)
         self.stealth_worker.question_transcribed.connect(self._on_stealth_question_transcribed)
         self.stealth_worker.answer_ready.connect(self._on_stealth_answer_ready)
+        self.stealth_worker.partial_answer_ready.connect(self._on_stealth_partial_answer)
+        self.stealth_worker.answer_source.connect(self._on_stealth_answer_source)
+        self.stealth_worker.audio_device_info.connect(self._on_stealth_audio_device)
         self.stealth_worker.error_occurred.connect(self._on_stealth_error)
         self.stealth_hud.answer_requested.connect(self._trigger_stealth_answer)
         self.stealth_hud.text_question_submitted.connect(self._handle_stealth_text_question)
+        self.stealth_hud.snip_requested.connect(self._trigger_stealth_snip)
         self.signals.toggle_stealth.connect(self._toggle_stealth_hud)
         self.signals.trigger_stealth_answer.connect(self._trigger_stealth_answer)
+        self.signals.trigger_stealth_snip.connect(self._trigger_stealth_snip)
+
+        # Screen Snipper Worker (Req 4: Crop Friend 1's screen questions)
+        self.screen_snipper = ScreenSnipperWorker(self)
+        self.screen_snipper.snippet_captured.connect(self._on_snippet_captured)
+        self.screen_snipper.snippet_cancelled.connect(self._on_snippet_cancelled)
+        self.screen_snipper.snippet_error.connect(self._on_stealth_error)
 
         # Meeting Recording Timer for live tray status
         self.meeting_timer = QTimer(self)
         self.meeting_timer.timeout.connect(self._update_meeting_tray_timer)
+
+        # Apply screen-share invisibility to the MAIN Jarvis window
+        # This makes the chat window invisible to Google Meet / Zoom screen sharing
+        # but still visible to the user on their physical screen.
+        QTimer.singleShot(500, self._apply_stealth_to_main_window)
 
         # Start Mobile API Server
         try:
@@ -465,12 +483,13 @@ class JarvisApp(QMainWindow):
             print(f"⚠️ Failed to start Mobile API server: {e}")
 
     def _setup_hotkeys(self):
-        """Initialize global system-wide hotkeys (Option+Space, Option+R, Option+S, Option+A)."""
+        """Initialize global system-wide hotkeys (Option+Space, Option+R, Option+S, Option+A, Option+O)."""
         self.hotkey_mgr = HotkeyManager(self)
         self.hotkey_mgr.hotkey_triggered.connect(self.signals.toggle_launcher.emit)
         self.hotkey_mgr.meeting_hotkey_triggered.connect(self._toggle_meeting_recording_from_tray)
         self.hotkey_mgr.stealth_toggle_triggered.connect(self._toggle_stealth_hud)
         self.hotkey_mgr.stealth_answer_triggered.connect(self._trigger_stealth_answer)
+        self.hotkey_mgr.stealth_snip_triggered.connect(self._trigger_stealth_snip)
         self.hotkey_mgr.start()
 
     def _handle_launcher_submission(self, query: str, silent: bool = True):
@@ -558,9 +577,13 @@ class JarvisApp(QMainWindow):
         self.stealth_action.triggered.connect(self._toggle_stealth_hud)
         self.tray_menu.addAction(self.stealth_action)
 
-        self.stealth_answer_action = QAction("⚡ Quick Answer Teacher's Question [⌥A]", self)
+        self.stealth_answer_action = QAction("⚡ Quick Answer Friend's Question [⌥A]", self)
         self.stealth_answer_action.triggered.connect(self._trigger_stealth_answer)
         self.tray_menu.addAction(self.stealth_answer_action)
+
+        self.stealth_snip_action = QAction("✂️ Screen Snippet Question Solver [⌥O]", self)
+        self.stealth_snip_action.triggered.connect(self._trigger_stealth_snip)
+        self.tray_menu.addAction(self.stealth_snip_action)
         
         self.tray_menu.addSeparator()
         
@@ -782,12 +805,40 @@ class JarvisApp(QMainWindow):
             self._toggle_stealth_hud()
 
         # Temporarily pause wakeword detector so microphone is exclusively available
-        if hasattr(self, "worker") and hasattr(self.worker, "wakeword") and self.worker.wakeword:
-            self.worker.wakeword.pause()
+        # Stop any active TTS speaking so audio never leaks to meeting
+        stop_speaking()
 
         self.stealth_hud.set_listening_state(True)
         if not self.stealth_worker.isRunning():
             self.stealth_worker.start()
+
+    def _trigger_stealth_snip(self):
+        """Trigger interactive screen snippet question capture (Req 4)."""
+        if not self.stealth_hud.isVisible():
+            self._toggle_stealth_hud()
+
+        # Stop any active TTS speaking
+        stop_speaking()
+
+        # Temporarily pause wakeword detector
+        if hasattr(self, "worker") and hasattr(self.worker, "wakeword") and self.worker.wakeword:
+            self.worker.wakeword.pause()
+
+        self.stealth_hud.set_listening_state(True, "✂️ Drag crosshairs over question on screen (Esc to cancel)...")
+        if not self.screen_snipper.isRunning():
+            self.screen_snipper.start()
+
+    def _on_snippet_captured(self, image_path: str):
+        """Handle snippet image captured from screen."""
+        self.stealth_hud.set_listening_state(True, "🔍 Solving question from screen snippet...")
+        self.stealth_worker.ask_image_question(image_path)
+
+    def _on_snippet_cancelled(self):
+        """Handle user cancelling snippet selection."""
+        self.stealth_hud.set_listening_state(False)
+        self.stealth_hud.question_box.setText("Snippet cancelled. Press ⌥O to retry.")
+        if hasattr(self, "worker") and hasattr(self.worker, "wakeword") and self.worker.wakeword:
+            self.worker.wakeword.resume()
 
     def _handle_stealth_text_question(self, question: str):
         """Directly synthesize answer for user-typed question in Stealth HUD."""
@@ -832,6 +883,18 @@ class JarvisApp(QMainWindow):
         # Safely resume wakeword detector
         if hasattr(self, "worker") and hasattr(self.worker, "wakeword") and self.worker.wakeword:
             self.worker.wakeword.resume()
+
+    def _on_stealth_partial_answer(self, question: str, direct_answer: str, key_points: list):
+        """Display quick flash answer from local KB while full CLI/SDK answer loads."""
+        self.stealth_hud.display_partial_answer(question, direct_answer, key_points)
+
+    def _on_stealth_answer_source(self, source: str):
+        """Update the answer source badge on the HUD."""
+        self.stealth_hud.set_answer_source(source)
+
+    def _on_stealth_audio_device(self, device_text: str):
+        """Update the audio source badge on the HUD."""
+        self.stealth_hud.set_audio_source(device_text)
 
     def _force_show_chat(self):
         """Force the chat window to open so the user can interact manually."""
@@ -941,8 +1004,42 @@ class JarvisApp(QMainWindow):
             self.raise_()
             self.activateWindow()
 
+    def _apply_stealth_to_main_window(self):
+        """Apply NSWindowSharingNone to the main Jarvis chat window.
+        
+        This makes the entire Jarvis app invisible to screen sharing,
+        screen recording, and screenshots — but still visible to the user
+        on their physical display. People in Google Meet / Zoom CANNOT
+        see the Jarvis window when you share your screen.
+        """
+        import sys
+        if sys.platform != "darwin":
+            return
+        try:
+            from AppKit import NSApp
+
+            for window in NSApp.windows():
+                title = window.title() or ""
+                if "J.A.R.V.I.S." in title:
+                    # NSWindowSharingNone = 0 → invisible to screen capture/sharing
+                    window.setSharingType_(0)
+                    print(f"  🛡️ Main window stealth: NSWindowSharingNone applied (sharingType={window.sharingType()})")
+                    print(f"      → Jarvis is INVISIBLE to Google Meet screen sharing")
+                    print(f"      → Jarvis is VISIBLE to you on your physical screen")
+                    break
+        except Exception as e:
+            print(f"  ⚠️  Could not apply stealth to main window: {e}")
+
     def _move_to_active_space(self):
-        """Use PyObjC to move the chat window to the currently active macOS Space."""
+        """Move all Jarvis windows to the currently active macOS Space.
+        
+        Uses a combination of:
+        - MoveToActiveSpace (1 << 1) = teleport window to the user's current Space
+        - CanJoinAllSpaces (1 << 0) = temporarily allow the window on all Spaces
+        
+        This ensures Jarvis opens on the SAME desktop where Google Meet is,
+        not on a different Space.
+        """
         import sys
         if sys.platform != "darwin":
             return
@@ -952,11 +1049,15 @@ class JarvisApp(QMainWindow):
             # NSWindowCollectionBehaviorMoveToActiveSpace = 1 << 1 = 2
             MoveToActiveSpace = 1 << 1
 
+            jarvis_titles = {"J.A.R.V.I.S.", "JarvisStealthHUD"}
+
             for window in NSApp.windows():
                 title = window.title() or ""
-                if "J.A.R.V.I.S." in title:
+                if any(t in title for t in jarvis_titles):
+                    # Set MoveToActiveSpace so it teleports to the current desktop
                     window.setCollectionBehavior_(MoveToActiveSpace)
-                    break
+                    # Force the window to the front on the active Space
+                    window.orderFrontRegardless()
         except Exception as e:
             print(f"  ⚠️  Could not move chat to active space: {e}")
 
