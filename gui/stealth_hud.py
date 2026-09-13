@@ -128,11 +128,49 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
 
         ns_window.orderFrontRegardless()
 
+        # ═══ SkyLight Private Framework: Sticky Tag for Fullscreen Spaces ═══
+        # On macOS 26+, NSWindow collection behaviors alone do NOT make a window
+        # visible on fullscreen Spaces. The window gets stranded in a different Space.
+        #
+        # The fix: Use SLSSetWindowTags with kCGSTagSticky (bit 11 = 0x800) at the
+        # CGS/WindowServer layer. This is the same mechanism macOS system overlays
+        # (Spotlight, Notification Center) use to appear on ALL Spaces including
+        # fullscreen ones.
+        try:
+            from ctypes import cdll, c_int, c_int64, byref
+            skylight = cdll.LoadLibrary(
+                "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
+            )
+            skylight._CGSDefaultConnection.restype = c_int
+            cgs_conn = skylight._CGSDefaultConnection()
+            wid = ns_window.windowNumber()
+
+            # kCGSTagSticky (0x800) = appear on ALL Spaces including fullscreen
+            kCGSTagSticky = c_int64(0x800)
+            skylight.SLSSetWindowTags(
+                c_int(cgs_conn), c_int(wid), byref(kCGSTagSticky), c_int(64)
+            )
+
+            # Also set level at CGS layer for double enforcement
+            skylight.SLSSetWindowLevel(
+                c_int(cgs_conn), c_int(wid), c_int(target_level)
+            )
+
+            # Cache for reassert timer
+            qt_widget._skylight = skylight
+            qt_widget._cgs_conn = cgs_conn
+            qt_widget._window_id = wid
+
+            ns_window.orderFrontRegardless()
+            print(f"  🛡️ Stealth mode active: sharingType={ns_window.sharingType()}, level={ns_window.level()}, "
+                  f"SkyLight sticky ✅, fullscreen-capable ✅")
+        except Exception as e_sl:
+            print(f"  🛡️ Stealth mode active: sharingType={ns_window.sharingType()}, level={ns_window.level()}, "
+                  f"SkyLight unavailable ({e_sl}), NSWindow-only mode")
+
         # Cache the NSWindow reference on the widget for fast access in reassert timer
         qt_widget._cached_ns_window = ns_window
 
-        print(f"  🛡️ Stealth mode active: sharingType={ns_window.sharingType()}, level={ns_window.level()}, "
-              f"class={ns_window.className()}, fullscreen-teleport ✅")
         return True
 
     except Exception as e:
@@ -710,10 +748,10 @@ class StealthHUDWindow(QWidget):
         does NOT make a window visible on a fullscreen Space — even at
         CGShieldingWindowLevel (2147483627), the window is NOT ON SCREEN.
 
-        The fix: when isOnActiveSpace() returns False, we toggle the collection
-        behavior to MoveToActiveSpace (1 << 1), call orderFrontRegardless() to
-        teleport the window into the active fullscreen Space, then switch back
-        to CanJoinAllSpaces + FullScreenAuxiliary for persistent visibility.
+        Proven fix (tested on macOS 26.3):
+        1. Re-apply SLSSetWindowTags with kCGSTagSticky (0x800) at the CGS layer
+        2. Toggle MoveToActiveSpace collection behavior as secondary technique
+        3. Re-assert window level and orderFrontRegardless
 
         This runs every 1.5 seconds while the HUD is visible.
         """
@@ -747,26 +785,35 @@ class StealthHUDWindow(QWidget):
                 on_active = ns_window.isOnActiveSpace()
 
             if not on_active:
-                # ═══ TELEPORT: Move window into the active Space (including fullscreen) ═══
-                #
-                # MoveToActiveSpace (1 << 1) tells macOS to teleport the window
-                # to whichever Space the user is currently on — even if that's a
-                # fullscreen app's private Space.
+                # ═══ PRIMARY: Re-apply SkyLight sticky tag ═══
+                # This is the proven technique — SLSSetWindowTags with kCGSTagSticky
+                # recovered the window from a fullscreen Space in testing.
+                skylight = getattr(self, "_skylight", None)
+                cgs_conn = getattr(self, "_cgs_conn", None)
+                wid = getattr(self, "_window_id", None)
+
+                if skylight and cgs_conn is not None and wid is not None:
+                    from ctypes import c_int, c_int64, byref
+                    kCGSTagSticky = c_int64(0x800)
+                    skylight.SLSSetWindowTags(
+                        c_int(cgs_conn), c_int(wid), byref(kCGSTagSticky), c_int(64)
+                    )
+
+                # ═══ SECONDARY: MoveToActiveSpace behavior toggle ═══
                 MOVE_TO_ACTIVE_SPACE = 1 << 1
                 FULL_SCREEN_AUXILIARY = 1 << 8
-
-                # Step 1: Switch to MoveToActiveSpace + FullScreenAuxiliary
-                ns_window.setCollectionBehavior_(MOVE_TO_ACTIVE_SPACE | FULL_SCREEN_AUXILIARY)
-                ns_window.orderFrontRegardless()
-
-                # Step 2: Switch back to CanJoinAllSpaces for persistent multi-Space visibility
                 CAN_JOIN_ALL_SPACES = 1 << 0
                 STATIONARY = 1 << 4
                 IGNORES_CYCLE = 1 << 6
+
+                # Step 1: Teleport to active Space
+                ns_window.setCollectionBehavior_(MOVE_TO_ACTIVE_SPACE | FULL_SCREEN_AUXILIARY)
+                ns_window.orderFrontRegardless()
+
+                # Step 2: Restore persistent behavior
                 ns_window.setCollectionBehavior_(
                     CAN_JOIN_ALL_SPACES | STATIONARY | IGNORES_CYCLE | FULL_SCREEN_AUXILIARY
                 )
-                ns_window.orderFrontRegardless()
 
             # Re-assert window level (macOS can demote during Space transitions)
             try:
