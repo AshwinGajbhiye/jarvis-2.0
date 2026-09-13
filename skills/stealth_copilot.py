@@ -564,8 +564,12 @@ class StealthQuestionWorker(QThread):
             self.listening_started.emit("🎙️ Listening for question... (Speak now)")
 
             recognizer = sr.Recognizer()
-            recognizer.energy_threshold = 45
+            # Lower energy threshold for better sensitivity when picking up
+            # a friend's voice through speakers (physical mic) or loopback device
+            recognizer.energy_threshold = 35
             recognizer.dynamic_energy_threshold = True
+            # Shorter pause threshold so Jarvis detects end-of-speech faster
+            recognizer.pause_threshold = 1.5
 
             try:
                 # Use loopback device if available, otherwise physical mic
@@ -574,22 +578,40 @@ class StealthQuestionWorker(QThread):
                     mic_kwargs["device_index"] = self._loopback_device_index
 
                 with sr.Microphone(**mic_kwargs) as source:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.6)
-                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=20)
+                    # Longer calibration for more stable baseline in noisy Meet environments
+                    recognizer.adjust_for_ambient_noise(source, duration=1.2)
+                    # Increased timeout (15s) and phrase limit (30s) to allow
+                    # friend to finish longer questions before cutting off
+                    audio = recognizer.listen(source, timeout=15, phrase_time_limit=30)
 
                 self.listening_started.emit("⚡ Transcribing question...")
                 question_text = recognizer.recognize_google(
                     audio, language=Config.STT_LANGUAGE or "en-US"
                 )
             except sr.WaitTimeoutError:
+                loopback_hint = ""
+                if self._loopback_device_index is None:
+                    loopback_hint = (
+                        "\n\n💡 To hear your friend's voice from Google Meet, install BlackHole:\n"
+                        "   brew install blackhole-2ch\n"
+                        "   Then set up a Multi-Output Device in Audio MIDI Setup."
+                    )
                 self.error_occurred.emit(
-                    "No voice detected. Type your question in the box above, "
-                    "or check your audio input device."
+                    "No voice detected within 15 seconds. "
+                    "Type your question in the box above, "
+                    f"or check your audio input device.{loopback_hint}"
                 )
                 return
             except sr.UnknownValueError:
                 self.error_occurred.emit(
                     "Audio was unclear. Press ⌥A to retry, or type your question above."
+                )
+                return
+            except OSError as e:
+                # Specific handling for mic-in-use contention (common with wakeword)
+                self.error_occurred.emit(
+                    f"Microphone access error: {e}. "
+                    "The mic may be in use by another process. Press ⌥A to retry."
                 )
                 return
             except Exception as e:

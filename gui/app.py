@@ -804,9 +804,14 @@ class JarvisApp(QMainWindow):
         if not self.stealth_hud.isVisible():
             self._toggle_stealth_hud()
 
-        # Temporarily pause wakeword detector so microphone is exclusively available
         # Stop any active TTS speaking so audio never leaks to meeting
         stop_speaking()
+
+        # Pause wakeword detector so microphone is exclusively available for stealth listener.
+        # The wakeword holds a continuous pyaudio stream open — even when "paused" it still
+        # reads audio chunks. This contention blocks the stealth copilot from capturing audio.
+        if hasattr(self, "worker") and hasattr(self.worker, "wakeword") and self.worker.wakeword:
+            self.worker.wakeword.pause()
 
         self.stealth_hud.set_listening_state(True)
         if not self.stealth_worker.isRunning():
