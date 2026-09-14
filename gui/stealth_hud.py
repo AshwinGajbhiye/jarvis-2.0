@@ -35,15 +35,18 @@ from config import Config
 
 def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
     """
-    Apply macOS NSWindowSharingNone (sharingType = 0) to make the window
-    completely invisible to screen capture, screen sharing, and recording.
+    Configure the Stealth HUD as a Spotlight-like NSPanel for reliable
+    fullscreen overlay and screen-share invisibility.
 
-    For fullscreen app visibility on macOS 26+:
-    - Window level alone does NOT work (even CGShieldingWindowLevel is blocked)
-    - Fullscreen apps create isolated Spaces that block ALL other windows
-    - The fix requires actively teleporting the window into the fullscreen Space
-      using the MoveToActiveSpace behavior toggle (done in _reassert_stealth_level)
-    - Initial setup uses CanJoinAllSpaces + FullScreenAuxiliary + max level
+    Architecture (modeled after macOS Spotlight):
+      1. Qt.WindowType.Tool flag → Qt creates QNSPanel (NSPanel subclass)
+      2. setFloatingPanel_(True) → float above ALL windows including fullscreen
+      3. FullScreenAuxiliary collection behavior → native fullscreen Space overlay
+      4. setSharingType_(0) → invisible to screen capture / screen sharing
+      5. SkyLight kCGSTagSticky (0x800) → belt-and-suspenders fullscreen stickiness
+
+    This is the exact same mechanism macOS Spotlight, Alfred, Raycast, and
+    Notification Center use to appear on ALL Spaces including fullscreen apps.
     """
     if sys.platform != "darwin":
         return False
@@ -54,88 +57,91 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
 
         qt_widget.setWindowTitle("JarvisStealthHUD")
 
-        ns_window = None
+        ns_panel = None
 
         # 1. Direct retrieval via Qt winId using c_void_p
         try:
             view_ptr = int(qt_widget.winId())
             ns_view = objc.objc_object(c_void_p=view_ptr)
-            ns_window = ns_view.window()
+            ns_panel = ns_view.window()
         except Exception:
             pass
 
         # 2. Fallback search through NSApp windows
-        if not ns_window and NSApp:
+        if not ns_panel and NSApp:
             for win in NSApp.windows():
                 if win.title() == "JarvisStealthHUD" or (
                     abs(win.frame().size.width - qt_widget.width()) < 10
                     and abs(win.frame().size.height - qt_widget.height()) < 10
                 ):
-                    ns_window = win
+                    ns_panel = win
                     break
 
-        if not ns_window:
-            print("  ⚠️ Could not retrieve NSWindow for Stealth HUD.")
+        if not ns_panel:
+            print("  ⚠️ Could not retrieve NSPanel for Stealth HUD.")
             return False
 
-        # NSWindowSharingNone = 0 (Window is omitted from screen capture / screen sharing)
-        ns_window.setSharingType_(0)
+        is_panel = ns_panel.isKindOfClass_(objc.lookUpClass('NSPanel'))
 
-        # Collection Behavior for multi-desktop (Spaces) & fullscreen apps:
-        #   CAN_JOIN_ALL_SPACES  (1 << 0)  = appear on every desktop/Space
-        #   STATIONARY           (1 << 4)  = stay in place during Space-switch animations
-        #   IGNORES_CYCLE        (1 << 6)  = skip Cmd+` app window cycling
-        #   FULL_SCREEN_AUXILIARY(1 << 8)  = eligible to appear on fullscreen Spaces
-        CAN_JOIN_ALL_SPACES = 1 << 0
-        STATIONARY = 1 << 4
-        IGNORES_CYCLE = 1 << 6
-        FULL_SCREEN_AUXILIARY = 1 << 8
-        collection_behavior = (
-            CAN_JOIN_ALL_SPACES
-            | STATIONARY
-            | IGNORES_CYCLE
-            | FULL_SCREEN_AUXILIARY
+        # ═══ Screen-Share Invisibility ═══
+        # NSWindowSharingNone = 0 (omitted from screen capture / screen sharing)
+        ns_panel.setSharingType_(0)
+
+        # ═══ Spotlight-Like NSPanel Configuration ═══
+        # These properties are what make Spotlight appear on every fullscreen app.
+        # They only work properly on NSPanel (created by Qt.WindowType.Tool flag).
+
+        # setFloatingPanel_(True): THE critical property. Makes the panel float
+        # above ALL windows across ALL Spaces, including fullscreen Spaces.
+        # This is the #1 difference between NSPanel and NSWindow behavior.
+        if is_panel and hasattr(ns_panel, 'setFloatingPanel_'):
+            ns_panel.setFloatingPanel_(True)
+
+        # worksWhenModal: appear even when modal dialogs are open
+        if is_panel and hasattr(ns_panel, 'setWorksWhenModal_'):
+            ns_panel.setWorksWhenModal_(True)
+
+        # becomesKeyOnlyIfNeeded: clicks on buttons/text don't steal app focus
+        if is_panel and hasattr(ns_panel, 'setBecomesKeyOnlyIfNeeded_'):
+            ns_panel.setBecomesKeyOnlyIfNeeded_(True)
+
+        # ═══ Collection Behavior (Spaces + Fullscreen) ═══
+        CAN_JOIN_ALL_SPACES = 1 << 0    # Appear on every desktop/Space
+        STATIONARY = 1 << 4              # Stay in place during Space-switch animations
+        IGNORES_CYCLE = 1 << 6           # Skip Cmd+` app window cycling
+        FULL_SCREEN_AUXILIARY = 1 << 8   # Overlay fullscreen apps (NSPanel-native)
+        ns_panel.setCollectionBehavior_(
+            CAN_JOIN_ALL_SPACES | STATIONARY | IGNORES_CYCLE | FULL_SCREEN_AUXILIARY
         )
-        ns_window.setCollectionBehavior_(collection_behavior)
 
-        # Use CGShieldingWindowLevel - 1 (2147483627) — the highest possible level
-        # below the WindowServer itself. This is above everything except the
-        # compositor's own shielding windows.
-        try:
-            from Quartz import CGShieldingWindowLevel
-            target_level = CGShieldingWindowLevel() - 1
-        except ImportError:
-            target_level = 1000  # Fallback to NSScreenSaverWindowLevel
-        ns_window.setLevel_(target_level)
+        # ═══ Window Level ═══
+        # kCGScreenSaverWindowLevel (1000) — high enough to be above all app windows
+        # and fullscreen content, but below the compositor's shielding windows.
+        # Spotlight uses level 23, but we use 1000 for maximum reliability.
+        TARGET_LEVEL = 1000
+        ns_panel.setLevel_(TARGET_LEVEL)
 
-        ns_window.setHidesOnDeactivate_(False)
+        # Don't hide when app deactivates
+        ns_panel.setHidesOnDeactivate_(False)
 
         # Prevent activation stealing — keep focus on user's active window
-        if ns_window.respondsToSelector_(b"_setPreventsActivation:"):
-            ns_window._setPreventsActivation_(True)
-
-        # becomesKeyOnlyIfNeeded — clicks on HUD buttons don't steal focus
-        if hasattr(ns_window, "setBecomesKeyOnlyIfNeeded_"):
-            ns_window.setBecomesKeyOnlyIfNeeded_(True)
+        if ns_panel.respondsToSelector_(b"_setPreventsActivation:"):
+            ns_panel._setPreventsActivation_(True)
 
         # No animation on space switch
-        if ns_window.respondsToSelector_(b"setAnimationBehavior:"):
-            ns_window.setAnimationBehavior_(0)
+        if ns_panel.respondsToSelector_(b"setAnimationBehavior:"):
+            ns_panel.setAnimationBehavior_(0)
 
-        # setCanHide_(False) — prevent macOS from auto-hiding us
-        if ns_window.respondsToSelector_(b"setCanHide:"):
-            ns_window.setCanHide_(False)
+        # Prevent macOS from auto-hiding us
+        if ns_panel.respondsToSelector_(b"setCanHide:"):
+            ns_panel.setCanHide_(False)
 
-        ns_window.orderFrontRegardless()
+        ns_panel.orderFrontRegardless()
 
-        # ═══ SkyLight Private Framework: Sticky Tag for Fullscreen Spaces ═══
-        # On macOS 26+, NSWindow collection behaviors alone do NOT make a window
-        # visible on fullscreen Spaces. The window gets stranded in a different Space.
-        #
-        # The fix: Use SLSSetWindowTags with kCGSTagSticky (bit 11 = 0x800) at the
-        # CGS/WindowServer layer. This is the same mechanism macOS system overlays
-        # (Spotlight, Notification Center) use to appear on ALL Spaces including
-        # fullscreen ones.
+        # ═══ SkyLight Private Framework: Belt-and-Suspenders Stickiness ═══
+        # The NSPanel + floatingPanel + FullScreenAuxiliary combination is the
+        # primary mechanism (identical to Spotlight). SkyLight sticky tag is
+        # applied as additional insurance for edge cases during Space transitions.
         try:
             from ctypes import cdll, c_int, c_int64, byref
             skylight = cdll.LoadLibrary(
@@ -143,17 +149,16 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
             )
             skylight._CGSDefaultConnection.restype = c_int
             cgs_conn = skylight._CGSDefaultConnection()
-            wid = ns_window.windowNumber()
+            wid = ns_panel.windowNumber()
 
             # kCGSTagSticky (0x800) = appear on ALL Spaces including fullscreen
             kCGSTagSticky = c_int64(0x800)
             skylight.SLSSetWindowTags(
                 c_int(cgs_conn), c_int(wid), byref(kCGSTagSticky), c_int(64)
             )
-
-            # Also set level at CGS layer for double enforcement
+            # Also set level at CGS layer
             skylight.SLSSetWindowLevel(
-                c_int(cgs_conn), c_int(wid), c_int(target_level)
+                c_int(cgs_conn), c_int(wid), c_int(TARGET_LEVEL)
             )
 
             # Cache for reassert timer
@@ -161,20 +166,24 @@ def _apply_stealth_to_window(qt_widget: QWidget) -> bool:
             qt_widget._cgs_conn = cgs_conn
             qt_widget._window_id = wid
 
-            ns_window.orderFrontRegardless()
-            print(f"  🛡️ Stealth mode active: sharingType={ns_window.sharingType()}, level={ns_window.level()}, "
-                  f"SkyLight sticky ✅, fullscreen-capable ✅")
-        except Exception as e_sl:
-            print(f"  🛡️ Stealth mode active: sharingType={ns_window.sharingType()}, level={ns_window.level()}, "
-                  f"SkyLight unavailable ({e_sl}), NSWindow-only mode")
+            ns_panel.orderFrontRegardless()
 
-        # Cache the NSWindow reference on the widget for fast access in reassert timer
-        qt_widget._cached_ns_window = ns_window
+            panel_type = "NSPanel" if is_panel else "NSWindow"
+            floating = ns_panel.isFloatingPanel() if is_panel else False
+            print(f"  🛡️ Stealth mode active: {panel_type} (floating={floating}), "
+                  f"sharingType={ns_panel.sharingType()}, level={ns_panel.level()}, "
+                  f"SkyLight sticky ✅, Spotlight-like ✅")
+        except Exception as e_sl:
+            print(f"  🛡️ Stealth mode active: sharingType={ns_panel.sharingType()}, "
+                  f"level={ns_panel.level()}, SkyLight unavailable ({e_sl})")
+
+        # Cache the NSPanel reference for fast access in reassert timer
+        qt_widget._cached_ns_window = ns_panel
 
         return True
 
     except Exception as e:
-        print(f"  ⚠️ Error configuring screen-share invisibility: {e}")
+        print(f"  ⚠️ Error configuring Spotlight-like stealth panel: {e}")
         return False
 
 
@@ -223,8 +232,12 @@ class StealthHUDWindow(QWidget):
         self.setWindowTitle("JarvisStealthHUD")
 
         # Frameless + Always on top + Transparent background
+        # Qt.WindowType.Tool → makes Qt create QNSPanel (NSPanel subclass)
+        # instead of QNSWindow (NSWindow). NSPanel is what Spotlight, Alfred,
+        # and Raycast use to appear on fullscreen Spaces natively.
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -722,9 +735,11 @@ class StealthHUDWindow(QWidget):
         """When the window is shown, apply stealth + start the re-assertion timer."""
         super().showEvent(event)
         self._apply_stealth()
-        # Start periodic re-assertion (every 2s) to counteract macOS Space demotions
+        # Start periodic re-assertion as a lightweight safety net.
+        # With NSPanel + floatingPanel, this is rarely needed (Spotlight-like behavior
+        # is native), but it catches edge cases during rapid Space switches.
         if not self._reassert_timer.isActive():
-            self._reassert_timer.start(1500)  # 1.5s for fast fullscreen Space teleport
+            self._reassert_timer.start(3000)  # 3s — NSPanel needs less aggressive reassertion
 
     def hideEvent(self, event):
         """When the window is hidden, stop the re-assertion timer to save CPU."""
@@ -742,18 +757,14 @@ class StealthHUDWindow(QWidget):
             self.badge_label.setText("🟡 HUD ACTIVE")
 
     def _reassert_stealth_level(self):
-        """Periodically teleport the HUD into the active macOS Space (including fullscreen).
+        """Lightweight safety net: re-assert NSPanel stealth properties if demoted.
 
-        On macOS 26+, fullscreen apps create isolated Spaces. Window level alone
-        does NOT make a window visible on a fullscreen Space — even at
-        CGShieldingWindowLevel (2147483627), the window is NOT ON SCREEN.
+        With the Spotlight-like NSPanel architecture (floatingPanel + FullScreenAuxiliary),
+        fullscreen overlay works natively — this timer is a belt-and-suspenders fallback
+        that re-applies SkyLight sticky tags and NSPanel properties if macOS ever
+        demotes the window during rapid Space transitions.
 
-        Proven fix (tested on macOS 26.3):
-        1. Re-apply SLSSetWindowTags with kCGSTagSticky (0x800) at the CGS layer
-        2. Toggle MoveToActiveSpace collection behavior as secondary technique
-        3. Re-assert window level and orderFrontRegardless
-
-        This runs every 1.5 seconds while the HUD is visible.
+        Runs every 3 seconds while the HUD is visible.
         """
         if not self.isVisible():
             self._reassert_timer.stop()
@@ -763,70 +774,50 @@ class StealthHUDWindow(QWidget):
             return
 
         try:
-            # Use cached NSWindow reference for speed (set by _apply_stealth_to_window)
-            ns_window = getattr(self, "_cached_ns_window", None)
+            # Use cached NSPanel reference (set by _apply_stealth_to_window)
+            ns_panel = getattr(self, "_cached_ns_window", None)
 
-            if not ns_window:
+            if not ns_panel:
                 import objc
                 try:
                     view_ptr = int(self.winId())
                     ns_view = objc.objc_object(c_void_p=view_ptr)
-                    ns_window = ns_view.window()
-                    self._cached_ns_window = ns_window
+                    ns_panel = ns_view.window()
+                    self._cached_ns_window = ns_panel
                 except Exception:
                     pass
 
-            if not ns_window:
+            if not ns_panel:
                 return
 
-            # Check if we're on the active Space
-            on_active = False
-            if ns_window.respondsToSelector_(b"isOnActiveSpace"):
-                on_active = ns_window.isOnActiveSpace()
+            TARGET_LEVEL = 1000  # kCGScreenSaverWindowLevel
 
-            if not on_active:
-                # ═══ PRIMARY: Re-apply SkyLight sticky tag ═══
-                # This is the proven technique — SLSSetWindowTags with kCGSTagSticky
-                # recovered the window from a fullscreen Space in testing.
-                skylight = getattr(self, "_skylight", None)
-                cgs_conn = getattr(self, "_cgs_conn", None)
-                wid = getattr(self, "_window_id", None)
+            # Re-assert NSPanel floating panel property (can be reset by Qt updates)
+            is_panel = ns_panel.isKindOfClass_(
+                __import__('objc').lookUpClass('NSPanel')
+            )
+            if is_panel and hasattr(ns_panel, 'isFloatingPanel'):
+                if not ns_panel.isFloatingPanel():
+                    ns_panel.setFloatingPanel_(True)
 
-                if skylight and cgs_conn is not None and wid is not None:
-                    from ctypes import c_int, c_int64, byref
-                    kCGSTagSticky = c_int64(0x800)
-                    skylight.SLSSetWindowTags(
-                        c_int(cgs_conn), c_int(wid), byref(kCGSTagSticky), c_int(64)
-                    )
+            # Re-assert level if demoted
+            if ns_panel.level() < TARGET_LEVEL:
+                ns_panel.setLevel_(TARGET_LEVEL)
 
-                # ═══ SECONDARY: MoveToActiveSpace behavior toggle ═══
-                MOVE_TO_ACTIVE_SPACE = 1 << 1
-                FULL_SCREEN_AUXILIARY = 1 << 8
-                CAN_JOIN_ALL_SPACES = 1 << 0
-                STATIONARY = 1 << 4
-                IGNORES_CYCLE = 1 << 6
+            # Re-apply SkyLight sticky tag if available
+            skylight = getattr(self, "_skylight", None)
+            cgs_conn = getattr(self, "_cgs_conn", None)
+            wid = getattr(self, "_window_id", None)
 
-                # Step 1: Teleport to active Space
-                ns_window.setCollectionBehavior_(MOVE_TO_ACTIVE_SPACE | FULL_SCREEN_AUXILIARY)
-                ns_window.orderFrontRegardless()
-
-                # Step 2: Restore persistent behavior
-                ns_window.setCollectionBehavior_(
-                    CAN_JOIN_ALL_SPACES | STATIONARY | IGNORES_CYCLE | FULL_SCREEN_AUXILIARY
+            if skylight and cgs_conn is not None and wid is not None:
+                from ctypes import c_int, c_int64, byref
+                kCGSTagSticky = c_int64(0x800)
+                skylight.SLSSetWindowTags(
+                    c_int(cgs_conn), c_int(wid), byref(kCGSTagSticky), c_int(64)
                 )
 
-            # Re-assert window level (macOS can demote during Space transitions)
-            try:
-                from Quartz import CGShieldingWindowLevel
-                target_level = CGShieldingWindowLevel() - 1
-            except ImportError:
-                target_level = 1000
-            current_level = ns_window.level()
-            if current_level < target_level:
-                ns_window.setLevel_(target_level)
-
-            # Always force to front
-            ns_window.orderFrontRegardless()
+            # Ensure visible
+            ns_panel.orderFrontRegardless()
 
         except Exception:
             pass
